@@ -1,14 +1,7 @@
 name: ruby-slack-support
-version: "0.2.0"
+version: "0.3.0"
 description: Local Hermes Dashboard support workstation with active handoff queue polling.
 author: Ruby Support
 license: MIT
 dashboard:
   manifest: dashboard/manifest.json
-requires_env:
-  - RUBY_SUPPORT_API_BASE_URL
-  - RUBY_SUPPORT_OPERATOR_TOKEN
-optional_env:
-  - RUBY_SUPPORT_DEFAULT_BRAND
-  - RUBY_SUPPORT_DEFAULT_SITE
-  - RUBY_SUPPORT_DEFAULT_LANGUAGE

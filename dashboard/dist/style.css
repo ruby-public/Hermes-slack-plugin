@@ -79,14 +79,16 @@
 }
 
 .rss-field,
-.rss-filter {
+.rss-filter,
+.rss-profile-picker {
   display: flex;
   flex-direction: column;
   gap: 6px;
 }
 
 .rss-field-label,
-.rss-filter > span {
+.rss-filter > span,
+.rss-profile-picker > span {
   color: var(--text-secondary, #a8a0bc);
   font-size: 12px;
 }
@@ -106,6 +108,10 @@
 .rss-input:focus,
 .rss-textarea:focus {
   border-color: var(--accent, #b9a6ff);
+}
+
+.rss-select {
+  min-width: 160px;
 }
 
 .rss-textarea {
@@ -192,6 +198,27 @@
 
 .rss-filter {
   flex: 1 1 118px;
+}
+
+.rss-profile-picker {
+  min-width: 190px;
+}
+
+.rss-setup-panel {
+  min-height: 0;
+}
+
+.rss-profile-form {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(160px, 0.8fr) minmax(160px, 0.8fr) minmax(240px, 1.2fr);
+}
+
+.rss-scope-line {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .rss-list {
@@ -314,6 +341,10 @@
   }
 
   .rss-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .rss-profile-form {
     grid-template-columns: 1fr;
   }
 }

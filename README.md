@@ -1,6 +1,6 @@
 # ruby-slack-support
 
-Local Hermes Dashboard workstation for Slack support handoffs.
+Local Hermes Dashboard workstation for support handoffs.
 
 This plugin turns Hermes Dashboard into the operator's support workstation. It
 polls the active handoff queue, alerts the operator when new tasks arrive,
@@ -18,8 +18,8 @@ Slack is not required for day-to-day support work.
   duplicate work.
 - Reads `task_id` from URLs such as
   `http://127.0.0.1:9119/ruby-slack-support?task_id=...`.
-- Calls the support Worker from local Hermes with
-  `RUBY_SUPPORT_OPERATOR_TOKEN`.
+- Stores one or more local support profiles. Each profile only needs
+  Environment, Brand, and Operator Token.
 - Builds a safe support prompt with the customer message, handoff reason, risk
   flags, sources, Chatwoot context, and raw task JSON.
 - Opens a local Hermes session through the Dashboard WebSocket gateway and
@@ -51,24 +51,39 @@ restart Dashboard after changing this file.
 
 ## Local Configuration
 
-Set these environment variables on each support operator's machine before
-starting Hermes:
+Open the `Ruby Support` tab and add a profile. The setup form only asks for:
 
-```bash
-export RUBY_SUPPORT_API_BASE_URL="https://internal-worker.example.com"
-export RUBY_SUPPORT_OPERATOR_TOKEN="op_..."
-export RUBY_SUPPORT_DEFAULT_BRAND="xpl"
-export RUBY_SUPPORT_DEFAULT_SITE="main"
-export RUBY_SUPPORT_DEFAULT_LANGUAGE="ko"
+- Environment: `Production` or `Staging`.
+- Brand: for example `xpl` or `daebak`.
+- Operator Token: the token already configured in Cloudflare for that operator
+  and brand.
+
+The plugin stores profiles locally at:
+
+```text
+~/.hermes/ruby-slack-support/config.json
 ```
 
-`RUBY_SUPPORT_OPERATOR_TOKEN` must allow these actions for the operator's brand,
-site, and language scope:
+The file is created with owner-only permissions when the operating system
+allows it. A support operator can add multiple profiles and switch between
+brands from the profile dropdown.
+
+The Operator Token must allow these actions for the operator's brand, site, and
+language scope:
 
 ```text
 support:handoff:read
 support:handoff:claim
 support:handoff:complete
+```
+
+Existing environment-variable configuration is still supported as a read-only
+fallback profile:
+
+```bash
+export RUBY_SUPPORT_API_BASE_URL="https://internal-worker.example.com"
+export RUBY_SUPPORT_OPERATOR_TOKEN="op_..."
+export RUBY_SUPPORT_DEFAULT_BRAND="xpl"
 ```
 
 ## Slack Button URL

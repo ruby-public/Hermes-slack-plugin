@@ -1,5 +1,6 @@
 (function () {
   const PLUGIN_NAME = "ruby-slack-support";
+  const PROFILE_STORAGE_KEY = "ruby-slack-support.activeProfileId";
   const SDK = window.__HERMES_PLUGIN_SDK__ || {};
   const React = SDK.React || window.React;
 
@@ -29,6 +30,39 @@
 
   function safeValue(value) {
     return value === undefined || value === null ? "" : String(value);
+  }
+
+  function storedProfileId() {
+    try {
+      return window.localStorage.getItem(PROFILE_STORAGE_KEY) || "";
+    } catch (_error) {
+      return "";
+    }
+  }
+
+  function rememberProfileId(profileId) {
+    try {
+      if (profileId) window.localStorage.setItem(PROFILE_STORAGE_KEY, profileId);
+      else window.localStorage.removeItem(PROFILE_STORAGE_KEY);
+    } catch (_error) {
+      // Local storage is optional in embedded Dashboard contexts.
+    }
+  }
+
+  function withProfile(path, profileId) {
+    if (!profileId) return path;
+    const separator = path.includes("?") ? "&" : "?";
+    return `${path}${separator}profile_id=${encodeURIComponent(profileId)}`;
+  }
+
+  function defaultProfileForm(config) {
+    const environments = config && config.environments && config.environments.length ? config.environments : [{id: "production", label: "Production"}];
+    return {
+      id: "",
+      environment: environments[0].id,
+      brand: "",
+      operator_token: "",
+    };
   }
 
   async function apiFetch(path, options) {
@@ -65,18 +99,20 @@
     ].filter((item) => item[1] !== undefined && item[1] !== null && item[1] !== "");
   }
 
-  function Button({children, kind = "secondary", disabled, onClick, href, title}) {
+  function Button({children, kind = "secondary", disabled, onClick, href, title, type = "button"}) {
     const props = {
       className: `rss-button rss-button-${kind}`,
       disabled,
       onClick,
       title,
+      type,
     };
     if (href) {
       props.href = href;
       props.target = "_blank";
       props.rel = "noreferrer";
       delete props.disabled;
+      delete props.type;
       return h("a", props, children);
     }
     return h("button", props, children);
@@ -97,21 +133,20 @@
     );
   }
 
-  function ConfigBanner({config}) {
-    if (!config) return null;
-    if (config.configured) {
+  function ConfigBanner({profile, hasProfiles}) {
+    if (profile) {
       return h(
         "div",
         {className: "rss-banner rss-banner-ok"},
         h("span", null, "Worker connected"),
-        h("code", null, config.api_base_url || "support Worker"),
+        h("code", null, `${profile.brand} · ${profile.environment_label || profile.environment}`),
       );
     }
     return h(
       "div",
       {className: "rss-banner rss-banner-warn"},
-      h("span", null, "Missing config"),
-      h("code", null, (config.missing || []).join(", ") || "unknown"),
+      h("span", null, hasProfiles ? "Select profile" : "Setup required"),
+      h("code", null, hasProfiles ? "Choose a brand" : "Environment, Brand, Token"),
     );
   }
 
@@ -135,9 +170,78 @@
     );
   }
 
+  function ProfileForm({config, form, saving, testing, testResult, onChange, onCancel, onSave, onTest}) {
+    const environments = config && config.environments && config.environments.length ? config.environments : [{id: "production", label: "Production"}];
+    const isEdit = Boolean(form.id);
+    return h(
+      "section",
+      {className: "rss-panel rss-setup-panel"},
+      h(
+        "div",
+        {className: "rss-section-head"},
+        h("div", null, h("h2", null, isEdit ? "Edit Profile" : "Add Profile"), h("p", null, "Site main · Language ko")),
+        h(
+          "div",
+          {className: "rss-actions"},
+          h(Button, {onClick: onCancel}, "Cancel"),
+          h(Button, {disabled: saving || testing, onClick: onSave}, saving ? "Saving" : "Save"),
+          h(Button, {kind: "primary", disabled: saving || testing, onClick: onTest}, testing ? "Testing" : "Save & test"),
+        ),
+      ),
+      h(
+        "div",
+        {className: "rss-profile-form"},
+        h(
+          "label",
+          {className: "rss-field"},
+          h("span", {className: "rss-field-label"}, "Environment"),
+          h(
+            "select",
+            {
+              className: "rss-input rss-select",
+              value: form.environment,
+              onChange: (event) => onChange({environment: event.target.value}),
+            },
+            environments.map((environment) => h("option", {key: environment.id, value: environment.id}, environment.label)),
+          ),
+        ),
+        h(
+          "label",
+          {className: "rss-field"},
+          h("span", {className: "rss-field-label"}, "Brand"),
+          h("input", {
+            className: "rss-input",
+            value: form.brand,
+            placeholder: "xpl",
+            onChange: (event) => onChange({brand: event.target.value}),
+          }),
+        ),
+        h(
+          "label",
+          {className: "rss-field"},
+          h("span", {className: "rss-field-label"}, "Operator Token"),
+          h("input", {
+            className: "rss-input",
+            type: "password",
+            value: form.operator_token,
+            placeholder: isEdit ? "Leave blank to keep current token" : "op_...",
+            onChange: (event) => onChange({operator_token: event.target.value}),
+          }),
+        ),
+      ),
+      testResult ? h("div", {className: "rss-session"}, testResult) : null,
+    );
+  }
+
   function App() {
     const [config, setConfig] = useState(null);
-    const [filters, setFilters] = useState({brand: "", site: "", language: "ko", status: "active", limit: "30"});
+    const [profiles, setProfiles] = useState([]);
+    const [activeProfileId, setActiveProfileId] = useState("");
+    const [profileForm, setProfileForm] = useState(() => defaultProfileForm(null));
+    const [setupOpen, setSetupOpen] = useState(false);
+    const [profileSaving, setProfileSaving] = useState(false);
+    const [profileTesting, setProfileTesting] = useState(false);
+    const [profileTestResult, setProfileTestResult] = useState("");
     const [queue, setQueue] = useState([]);
     const [selectedId, setSelectedId] = useState(getQueryTaskId);
     const [taskData, setTaskData] = useState(null);
@@ -154,6 +258,10 @@
     const seenIdsRef = useRef(new Set());
     const wsRef = useRef(null);
 
+    const selectedProfile = useMemo(
+      () => profiles.find((profile) => profile.id === activeProfileId) || null,
+      [activeProfileId, profiles],
+    );
     const task = taskData && taskData.task ? taskData.task : null;
     const prompt = taskData && taskData.prompt ? taskData.prompt : "";
     const context = taskContext(task);
@@ -171,6 +279,14 @@
       else nextUrl.searchParams.delete("task_id");
       window.history.replaceState(null, "", nextUrl.toString());
     }, []);
+
+    const resetSelection = useCallback(() => {
+      setSelectedId("");
+      setTaskData(null);
+      setRunLines([]);
+      setSessionId("");
+      updateUrlTaskId("");
+    }, [updateUrlTaskId]);
 
     const notifyNewTasks = useCallback(
       (items) => {
@@ -203,35 +319,44 @@
       });
     }, []);
 
+    const applyProfiles = useCallback((nextConfig) => {
+      const nextProfiles = nextConfig && nextConfig.profiles ? nextConfig.profiles : [];
+      setProfiles(nextProfiles);
+      setConfig(nextConfig);
+      setProfileForm((current) => (current.id || current.brand || current.operator_token ? current : defaultProfileForm(nextConfig)));
+
+      const remembered = storedProfileId();
+      const preferred = remembered || (nextConfig && nextConfig.active_profile_id) || "";
+      const nextActive = nextProfiles.find((profile) => profile.id === preferred)
+        ? preferred
+        : nextProfiles.length
+          ? nextProfiles[0].id
+          : "";
+      setActiveProfileId(nextActive);
+      rememberProfileId(nextActive);
+      setSetupOpen(!nextProfiles.length);
+      if (!nextProfiles.length) {
+        setQueue([]);
+        resetSelection();
+      }
+    }, [resetSelection]);
+
     const loadConfig = useCallback(async () => {
       try {
         const nextConfig = await apiFetch("/config");
-        setConfig(nextConfig);
-        if (nextConfig && nextConfig.defaults) {
-          setFilters((current) => ({
-            ...current,
-            brand: current.brand || nextConfig.defaults.brand || "",
-            site: current.site || nextConfig.defaults.site || "",
-            language: current.language || nextConfig.defaults.language || "ko",
-          }));
-        }
+        applyProfiles(nextConfig);
       } catch (nextError) {
         setError(formatDetail(nextError));
       }
-    }, []);
+    }, [applyProfiles]);
 
     const loadQueue = useCallback(
       async (options = {}) => {
-        const scopeReady = filters.brand && filters.site && filters.language;
-        if (!scopeReady) return;
+        if (!activeProfileId) return;
         if (!options.silent) setLoadingQueue(true);
         setError("");
         try {
-          const query = new URLSearchParams();
-          for (const [key, value] of Object.entries(filters)) {
-            if (value) query.set(key, value);
-          }
-          const response = await apiFetch(`/handoffs?${query.toString()}`);
+          const response = await apiFetch(withProfile("/handoffs?status=active&limit=30", activeProfileId));
           const tasks = response.tasks || [];
           const nextNew = tasks.filter((item) => item.task_id && !seenIdsRef.current.has(item.task_id));
           tasks.forEach((item) => {
@@ -246,17 +371,17 @@
           setLoadingQueue(false);
         }
       },
-      [filters, notifyNewTasks],
+      [activeProfileId, notifyNewTasks],
     );
 
     const loadTask = useCallback(
       async (id) => {
         const cleanId = (id || "").trim();
-        if (!cleanId) return;
+        if (!cleanId || !activeProfileId) return;
         setLoadingTask(true);
         setError("");
         try {
-          const response = await apiFetch(`/handoffs/${encodeURIComponent(cleanId)}`);
+          const response = await apiFetch(withProfile(`/handoffs/${encodeURIComponent(cleanId)}`, activeProfileId));
           setTaskData(response);
           setSelectedId(cleanId);
           updateUrlTaskId(cleanId);
@@ -267,17 +392,17 @@
           setLoadingTask(false);
         }
       },
-      [updateUrlTaskId],
+      [activeProfileId, updateUrlTaskId],
     );
 
     const runTaskAction = useCallback(
       async (action, options = {}) => {
         const id = options.taskId || (task && task.task_id);
-        if (!id) return null;
+        if (!id || !activeProfileId) return null;
         setActionBusy(action);
         setError("");
         try {
-          const response = await apiFetch(`/handoffs/${encodeURIComponent(id)}/${action}`, {
+          const response = await apiFetch(withProfile(`/handoffs/${encodeURIComponent(id)}/${action}`, activeProfileId), {
             method: "POST",
             headers: {"Content-Type": "application/json"},
             body: JSON.stringify(options.payload || {}),
@@ -294,8 +419,92 @@
           setActionBusy("");
         }
       },
-      [appendRunLine, mergeQueueTask, task],
+      [activeProfileId, appendRunLine, mergeQueueTask, task],
     );
+
+    const openNewProfile = useCallback(() => {
+      setProfileForm(defaultProfileForm(config));
+      setProfileTestResult("");
+      setSetupOpen(true);
+    }, [config]);
+
+    const openEditProfile = useCallback(() => {
+      if (!selectedProfile || selectedProfile.read_only) return;
+      setProfileForm({
+        id: selectedProfile.id,
+        environment: selectedProfile.environment,
+        brand: selectedProfile.brand,
+        operator_token: "",
+      });
+      setProfileTestResult("");
+      setSetupOpen(true);
+    }, [selectedProfile]);
+
+    const saveProfile = useCallback(
+      async (shouldTest) => {
+        setProfileSaving(true);
+        setProfileTestResult("");
+        setError("");
+        try {
+          const response = await apiFetch("/profiles", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify(profileForm),
+          });
+          const savedProfile = response.profile;
+          setProfiles(response.profiles || []);
+          setActiveProfileId(savedProfile.id);
+          rememberProfileId(savedProfile.id);
+
+          if (shouldTest) {
+            setProfileSaving(false);
+            setProfileTesting(true);
+            const test = await apiFetch(`/profiles/${encodeURIComponent(savedProfile.id)}/test`, {method: "POST"});
+            setProfileTestResult(`Connected · ${test.task_count || 0} active handoff${test.task_count === 1 ? "" : "s"}`);
+          }
+
+          setSetupOpen(false);
+          setProfileForm(defaultProfileForm(config));
+          await loadConfig();
+        } catch (nextError) {
+          setError(formatDetail(nextError));
+        } finally {
+          setProfileSaving(false);
+          setProfileTesting(false);
+        }
+      },
+      [config, loadConfig, profileForm],
+    );
+
+    const activateProfile = useCallback(
+      async (profileId) => {
+        if (!profileId) return;
+        setActiveProfileId(profileId);
+        rememberProfileId(profileId);
+        resetSelection();
+        seenIdsRef.current = new Set();
+        try {
+          await apiFetch(`/profiles/${encodeURIComponent(profileId)}/activate`, {method: "POST"});
+        } catch (nextError) {
+          setError(formatDetail(nextError));
+        }
+      },
+      [resetSelection],
+    );
+
+    const deleteSelectedProfile = useCallback(async () => {
+      if (!selectedProfile || selectedProfile.read_only) return;
+      const confirmed = window.confirm(`Remove ${selectedProfile.brand} / ${selectedProfile.environment_label || selectedProfile.environment}?`);
+      if (!confirmed) return;
+      setError("");
+      try {
+        await apiFetch(`/profiles/${encodeURIComponent(selectedProfile.id)}`, {method: "DELETE"});
+        rememberProfileId("");
+        await loadConfig();
+      } catch (nextError) {
+        setError(formatDetail(nextError));
+      }
+    }, [loadConfig, selectedProfile]);
 
     const copyPrompt = useCallback(async () => {
       if (!prompt) return;
@@ -397,24 +606,25 @@
 
     useEffect(() => {
       loadConfig();
-      const initialTaskId = getQueryTaskId();
-      if (initialTaskId) loadTask(initialTaskId);
       return () => {
         if (wsRef.current) wsRef.current.close();
       };
-    }, [loadConfig, loadTask]);
+    }, [loadConfig]);
 
     useEffect(() => {
+      if (!activeProfileId) return;
       loadQueue({silent: false, detectNew: false});
-    }, [filters.brand, filters.site, filters.language, filters.status, filters.limit]);
+      const initialTaskId = getQueryTaskId();
+      if (initialTaskId) loadTask(initialTaskId);
+    }, [activeProfileId, loadQueue, loadTask]);
 
     useEffect(() => {
-      if (!pollEnabled) return undefined;
+      if (!pollEnabled || !activeProfileId) return undefined;
       const timer = window.setInterval(() => {
         loadQueue({silent: true, detectNew: true});
       }, pollMs);
       return () => window.clearInterval(timer);
-    }, [loadQueue, pollEnabled]);
+    }, [activeProfileId, loadQueue, pollEnabled]);
 
     useEffect(() => {
       const originalTitle = document.title;
@@ -439,7 +649,28 @@
         h(
           "div",
           {className: "rss-header-actions"},
-          h(ConfigBanner, {config}),
+          h(ConfigBanner, {profile: selectedProfile, hasProfiles: profiles.length > 0}),
+          profiles.length
+            ? h(
+                "label",
+                {className: "rss-profile-picker"},
+                h("span", null, "Profile"),
+                h(
+                  "select",
+                  {
+                    className: "rss-input rss-select",
+                    value: activeProfileId,
+                    onChange: (event) => activateProfile(event.target.value),
+                  },
+                  profiles.map((profile) =>
+                    h("option", {key: profile.id, value: profile.id}, `${profile.brand} / ${profile.environment_label || profile.environment}`),
+                  ),
+                ),
+              )
+            : null,
+          h(Button, {onClick: openNewProfile}, "Add profile"),
+          selectedProfile && !selectedProfile.read_only ? h(Button, {onClick: openEditProfile}, "Edit") : null,
+          selectedProfile && !selectedProfile.read_only ? h(Button, {onClick: deleteSelectedProfile}, "Remove") : null,
           h(Button, {onClick: () => setPollEnabled((value) => !value)}, pollEnabled ? "Polling on" : "Polling off"),
           h(Button, {onClick: enableBrowserAlerts}, alertsEnabled ? "Alerts on" : "Enable alerts"),
         ),
@@ -447,6 +678,22 @@
       error ? h("div", {className: "rss-error"}, error) : null,
       newTaskIds.length
         ? h("div", {className: "rss-alert"}, `${newTaskIds.length} new handoff${newTaskIds.length > 1 ? "s" : ""} waiting in the queue.`)
+        : null,
+      setupOpen
+        ? h(ProfileForm, {
+            config,
+            form: profileForm,
+            saving: profileSaving,
+            testing: profileTesting,
+            testResult: profileTestResult,
+            onChange: (patch) => setProfileForm((current) => ({...current, ...patch})),
+            onCancel: () => {
+              setSetupOpen(false);
+              setProfileTestResult("");
+            },
+            onSave: () => saveProfile(false),
+            onTest: () => saveProfile(true),
+          })
         : null,
       h(
         "div",
@@ -457,25 +704,17 @@
           h(
             "div",
             {className: "rss-section-head"},
-            h("div", null, h("h2", null, "Queue"), h("p", null, `${openCount} open · ${claimedCount} claimed · ${lastRefresh || "not refreshed"}`)),
-            h(Button, {disabled: loadingQueue, onClick: () => loadQueue({silent: false, detectNew: false})}, loadingQueue ? "Loading" : "Refresh"),
-          ),
-          h(
-            "div",
-            {className: "rss-filters"},
-            ["brand", "site", "language", "status", "limit"].map((key) =>
-              h(
-                "label",
-                {key, className: "rss-filter"},
-                h("span", null, key),
-                h("input", {
-                  className: "rss-input",
-                  value: filters[key],
-                  onChange: (event) => setFilters((current) => ({...current, [key]: event.target.value})),
-                }),
-              ),
+            h(
+              "div",
+              null,
+              h("h2", null, "Queue"),
+              h("p", null, selectedProfile ? `${openCount} open · ${claimedCount} claimed · ${lastRefresh || "not refreshed"}` : "No profile selected"),
             ),
+            h(Button, {disabled: loadingQueue || !selectedProfile, onClick: () => loadQueue({silent: false, detectNew: false})}, loadingQueue ? "Loading" : "Refresh"),
           ),
+          selectedProfile
+            ? h("div", {className: "rss-scope-line"}, h(Chip, null, selectedProfile.brand), h(Chip, null, selectedProfile.environment_label || selectedProfile.environment))
+            : null,
           queue.length
             ? h(
                 "div",
@@ -490,7 +729,7 @@
                   }),
                 ),
               )
-            : h("div", {className: "rss-empty"}, "No active handoffs."),
+            : h("div", {className: "rss-empty"}, selectedProfile ? "No active handoffs." : "Add a profile to start polling."),
         ),
         h(
           "section",
@@ -533,8 +772,14 @@
             : h(
                 "div",
                 {className: "rss-empty rss-empty-large"},
-                h("h2", null, "Select a handoff"),
-                h("p", null, "The workstation polls for active support handoffs. Select one to review context, claim it, and start a local Hermes session."),
+                h("h2", null, selectedProfile ? "Select a handoff" : "Setup required"),
+                h(
+                  "p",
+                  null,
+                  selectedProfile
+                    ? "Select one to review context, claim it, and start a local Hermes session."
+                    : "Add Environment, Brand, and Operator Token.",
+                ),
               ),
         ),
       ),
