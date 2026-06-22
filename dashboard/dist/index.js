@@ -1,6 +1,10 @@
 (function () {
   const PLUGIN_NAME = "ruby-slack-support";
   const PROFILE_STORAGE_KEY = "ruby-slack-support.activeProfileId";
+  const FALLBACK_ENVIRONMENTS = [
+    {id: "production", label: "Production"},
+    {id: "staging", label: "Staging"},
+  ];
   const SDK = window.__HERMES_PLUGIN_SDK__ || {};
   const React = SDK.React || window.React;
 
@@ -55,8 +59,21 @@
     return `${path}${separator}profile_id=${encodeURIComponent(profileId)}`;
   }
 
+  function environmentOptions(config) {
+    const byId = new Map(FALLBACK_ENVIRONMENTS.map((environment) => [environment.id, environment]));
+    const configured = config && Array.isArray(config.environments) ? config.environments : [];
+    configured.forEach((environment) => {
+      if (!environment || !environment.id) return;
+      byId.set(environment.id, {
+        id: environment.id,
+        label: environment.label || environment.id,
+      });
+    });
+    return Array.from(byId.values());
+  }
+
   function defaultProfileForm(config) {
-    const environments = config && config.environments && config.environments.length ? config.environments : [{id: "production", label: "Production"}];
+    const environments = environmentOptions(config);
     return {
       id: "",
       environment: environments[0].id,
@@ -139,14 +156,14 @@
         "div",
         {className: "rss-banner rss-banner-ok"},
         h("span", null, "Worker connected"),
-        h("code", null, `${profile.brand} · ${profile.environment_label || profile.environment}`),
+        h("span", {className: "rss-banner-detail"}, `${profile.brand} · ${profile.environment_label || profile.environment}`),
       );
     }
     return h(
       "div",
       {className: "rss-banner rss-banner-warn"},
       h("span", null, hasProfiles ? "Select profile" : "Setup required"),
-      h("code", null, hasProfiles ? "Choose a brand" : "Environment, Brand, Token"),
+      h("span", {className: "rss-banner-detail"}, hasProfiles ? "Choose a brand" : "Environment, Brand, Token"),
     );
   }
 
@@ -171,7 +188,7 @@
   }
 
   function ProfileForm({config, form, saving, testing, testResult, onChange, onCancel, onSave, onTest}) {
-    const environments = config && config.environments && config.environments.length ? config.environments : [{id: "production", label: "Production"}];
+    const environments = environmentOptions(config);
     const isEdit = Boolean(form.id);
     return h(
       "section",

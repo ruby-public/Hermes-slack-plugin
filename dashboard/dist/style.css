@@ -174,18 +174,40 @@
   align-items: center;
   display: flex;
   gap: 10px;
+  max-width: 100%;
 }
 
-.rss-banner code,
 .rss-session code {
   color: inherit;
   font-size: 12px;
+}
+
+.rss-banner > span:first-child {
+  color: inherit;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.rss-banner-detail {
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  color: #ffe2a1;
+  display: inline-flex;
+  font-size: 12px;
+  line-height: 1.2;
+  padding: 4px 7px;
+  white-space: nowrap;
 }
 
 .rss-banner-ok {
   background: rgba(61, 173, 121, 0.12);
   border: 1px solid rgba(61, 173, 121, 0.28);
   color: #90e4ba;
+}
+
+.rss-banner-ok .rss-banner-detail {
+  color: #d6ffe7;
 }
 
 .rss-banner-warn,
