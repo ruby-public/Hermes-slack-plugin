@@ -1,0 +1,15 @@
+{
+  "name": "ruby-slack-support",
+  "label": "Ruby Support",
+  "description": "Local Hermes workstation for Slack support handoffs.",
+  "icon": "MessageSquare",
+  "version": "0.1.0",
+  "tab": {
+    "path": "/ruby-slack-support",
+    "position": "after:sessions"
+  },
+  "entry": "dist/index.js",
+  "css": "dist/style.css",
+  "api": "plugin_api.py"
+}
+
