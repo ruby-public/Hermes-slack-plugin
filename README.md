@@ -2,14 +2,20 @@
 
 Local Hermes Dashboard workstation for Slack support handoffs.
 
-This plugin lets a Slack support alert open the operator's own local Hermes
-Dashboard. It fetches the handoff task with the operator's local token, shows
-the task context, and can start a Hermes session with the handoff prompt already
-submitted.
+This plugin turns Hermes Dashboard into the operator's support workstation. It
+polls the active handoff queue, alerts the operator when new tasks arrive,
+fetches task context with the operator's local token, and can start a Hermes
+session with the handoff prompt already submitted.
+
+Slack alerts can still open the same plugin through a local Dashboard URL, but
+Slack is not required for day-to-day support work.
 
 ## What It Does
 
-- Adds a `Ruby Support` tab to Hermes Dashboard.
+- Adds a `Ruby Support` workstation tab to Hermes Dashboard.
+- Polls the active handoff queue and highlights new tasks.
+- Supports claim, release, and complete actions so multiple operators do not
+  duplicate work.
 - Reads `task_id` from URLs such as
   `http://127.0.0.1:9119/ruby-slack-support?task_id=...`.
 - Calls the support Worker from local Hermes with
@@ -56,19 +62,27 @@ export RUBY_SUPPORT_DEFAULT_SITE="main"
 export RUBY_SUPPORT_DEFAULT_LANGUAGE="ko"
 ```
 
-`RUBY_SUPPORT_OPERATOR_TOKEN` must allow the `support:handoff:read` action for
-the operator's brand, site, and language scope.
+`RUBY_SUPPORT_OPERATOR_TOKEN` must allow these actions for the operator's brand,
+site, and language scope:
+
+```text
+support:handoff:read
+support:handoff:claim
+support:handoff:complete
+```
 
 ## Slack Button URL
 
-Configure the external Chatwoot Worker with a local Dashboard URL template:
+Slack is optional. If you keep Slack handoff alerts, configure the external
+Chatwoot Worker with a local Dashboard URL template:
 
 ```text
 HERMES_WORKSTATION_BASE_URL=http://127.0.0.1:9119/ruby-slack-support?task_id={task_id}
 ```
 
 Each support operator uses the same Slack app and the same Slack alert, but the
-button opens that operator's own local Hermes Dashboard.
+button opens that operator's own local Hermes Dashboard. Operators can also skip
+Slack entirely and work from the plugin queue.
 
 ## Development
 

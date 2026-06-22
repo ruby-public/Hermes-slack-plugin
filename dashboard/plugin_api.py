@@ -54,7 +54,12 @@ def _require_config() -> tuple[str, str]:
     return base_url, token
 
 
-def _fetch_worker_json(path: str, query: dict[str, Any] | None = None) -> dict[str, Any]:
+def _worker_json(
+    method: str,
+    path: str,
+    query: dict[str, Any] | None = None,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     base_url, token = _require_config()
     url = f"{base_url}{path}"
     if query:
@@ -62,13 +67,21 @@ def _fetch_worker_json(path: str, query: dict[str, Any] | None = None) -> dict[s
         if clean_query:
             url = f"{url}?{urlencode(clean_query)}"
 
+    body = None
+    headers = {
+        "Accept": "application/json",
+        "Authorization": f"Bearer {token}",
+        "User-Agent": f"{PLUGIN_NAME}/0.2.0",
+    }
+    if payload is not None:
+        body = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+
     request = Request(
         url,
-        headers={
-            "Accept": "application/json",
-            "Authorization": f"Bearer {token}",
-            "User-Agent": f"{PLUGIN_NAME}/0.1.0",
-        },
+        data=body,
+        headers=headers,
+        method=method,
     )
 
     try:
@@ -142,7 +155,7 @@ def _build_prompt(task: dict[str, Any]) -> str:
     prompt_sections = [
         "You are Ruby Support, the operator's local Hermes assistant.",
         "",
-        "A customer support handoff was opened from Slack. Review the task, use the operator's permitted local tools when needed, and help the operator decide the next action.",
+        "A customer support handoff was opened in the Hermes workstation. Review the task, use the operator's permitted local tools when needed, and help the operator decide the next action.",
         "",
         "Operating rules:",
         "- Do not send any customer-facing message without explicit operator confirmation.",
@@ -204,7 +217,7 @@ def list_handoffs(
     brand: str | None = Query(default=None),
     site: str | None = Query(default=None),
     language: str | None = Query(default=None),
-    status: str = Query(default="open"),
+    status: str = Query(default="active"),
     limit: int = Query(default=20, ge=1, le=100),
 ) -> dict[str, Any]:
     defaults = _defaults()
@@ -224,7 +237,8 @@ def list_handoffs(
             },
         )
 
-    response = _fetch_worker_json(
+    response = _worker_json(
+        "GET",
         "/v1/support/handoffs",
         {**scope, "status": status, "limit": limit},
     )
@@ -239,7 +253,7 @@ def list_handoffs(
 @router.get("/handoffs/{task_id}")
 def get_handoff(task_id: str) -> dict[str, Any]:
     safe_task_id = quote(task_id, safe="")
-    response = _fetch_worker_json(f"/v1/support/handoffs/{safe_task_id}")
+    response = _worker_json("GET", f"/v1/support/handoffs/{safe_task_id}")
     task = response.get("task")
     if not isinstance(task, dict):
         raise HTTPException(
@@ -255,3 +269,36 @@ def get_handoff(task_id: str) -> dict[str, Any]:
         "prompt": _build_prompt(task),
     }
 
+
+@router.post("/handoffs/{task_id}/claim")
+def claim_handoff(task_id: str) -> dict[str, Any]:
+    return _handoff_action(task_id, "claim")
+
+
+@router.post("/handoffs/{task_id}/release")
+def release_handoff(task_id: str) -> dict[str, Any]:
+    return _handoff_action(task_id, "release")
+
+
+@router.post("/handoffs/{task_id}/complete")
+def complete_handoff(task_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    return _handoff_action(task_id, "complete", payload or {})
+
+
+def _handoff_action(task_id: str, action: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    safe_task_id = quote(task_id, safe="")
+    response = _worker_json("POST", f"/v1/support/handoffs/{safe_task_id}/{action}", payload=payload or {})
+    task = response.get("task")
+    if not isinstance(task, dict):
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": "ruby_support_missing_task",
+                "message": "The support Worker response did not include a task object.",
+            },
+        )
+    return {
+        "request_id": response.get("request_id"),
+        "task": task,
+        "prompt": _build_prompt(task),
+    }
