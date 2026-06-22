@@ -159,12 +159,15 @@
         h("span", {className: "rss-banner-detail"}, `${profile.brand} · ${profile.environment_label || profile.environment}`),
       );
     }
-    return h(
-      "div",
-      {className: "rss-banner rss-banner-warn"},
-      h("span", null, hasProfiles ? "Select profile" : "Setup required"),
-      h("span", {className: "rss-banner-detail"}, hasProfiles ? "Choose a brand" : "Environment, Brand, Token"),
-    );
+    if (hasProfiles) {
+      return h(
+        "div",
+        {className: "rss-banner rss-banner-warn"},
+        h("span", null, "Select profile"),
+        h("span", {className: "rss-banner-detail"}, "Choose a brand"),
+      );
+    }
+    return null;
   }
 
   function QueueRow({task, selected, isNew, onSelect}) {
@@ -187,66 +190,84 @@
     );
   }
 
-  function ProfileForm({config, form, saving, testing, testResult, onChange, onCancel, onSave, onTest}) {
+  function ProfileForm({config, form, hasProfiles, saving, testing, testResult, errorMessage, onChange, onCancel, onSave, onTest}) {
     const environments = environmentOptions(config);
     const isEdit = Boolean(form.id);
     return h(
-      "section",
-      {className: "rss-panel rss-setup-panel"},
+      "div",
+      {
+        className: "rss-modal-backdrop",
+        onMouseDown: (event) => {
+          if (event.target === event.currentTarget && !saving && !testing) onCancel();
+        },
+      },
       h(
         "div",
-        {className: "rss-section-head"},
-        h("div", null, h("h2", null, isEdit ? "Edit Profile" : "Add Profile"), h("p", null, "Site main · Language ko")),
+        {className: "rss-modal", role: "dialog", "aria-modal": "true", "aria-label": isEdit ? "Edit profile" : "Add profile"},
         h(
           "div",
-          {className: "rss-actions"},
-          h(Button, {onClick: onCancel}, "Cancel"),
-          h(Button, {disabled: saving || testing, onClick: onSave}, saving ? "Saving" : "Save"),
-          h(Button, {kind: "primary", disabled: saving || testing, onClick: onTest}, testing ? "Testing" : "Save & test"),
-        ),
-      ),
-      h(
-        "div",
-        {className: "rss-profile-form"},
-        h(
-          "label",
-          {className: "rss-field"},
-          h("span", {className: "rss-field-label"}, "Environment"),
+          {className: "rss-section-head"},
           h(
-            "select",
-            {
-              className: "rss-input rss-select",
-              value: form.environment,
-              onChange: (event) => onChange({environment: event.target.value}),
-            },
-            environments.map((environment) => h("option", {key: environment.id, value: environment.id}, environment.label)),
+            "div",
+            null,
+            h("h2", null, isEdit ? "Edit Profile" : "Add Profile"),
+            h("p", null, hasProfiles ? "Site main · Language ko" : "Setup required · Environment, Brand, Token"),
+          ),
+          h(
+            "div",
+            {className: "rss-actions"},
+            h(Button, {onClick: onCancel, disabled: saving || testing}, "Cancel"),
+            h(Button, {disabled: saving || testing, onClick: onSave}, saving ? "Saving" : "Save"),
+            h(Button, {kind: "primary", disabled: saving || testing, onClick: onTest}, testing ? "Testing" : "Save & test"),
           ),
         ),
+        !hasProfiles && !isEdit
+          ? h("div", {className: "rss-banner rss-banner-warn rss-modal-banner"}, h("span", null, "Setup required"), h("span", {className: "rss-banner-detail"}, "Environment, Brand, Token"))
+          : null,
+        errorMessage ? h("div", {className: "rss-error"}, errorMessage) : null,
         h(
-          "label",
-          {className: "rss-field"},
-          h("span", {className: "rss-field-label"}, "Brand"),
-          h("input", {
-            className: "rss-input",
-            value: form.brand,
-            placeholder: "xpl",
-            onChange: (event) => onChange({brand: event.target.value}),
-          }),
+          "div",
+          {className: "rss-profile-form"},
+          h(
+            "label",
+            {className: "rss-field"},
+            h("span", {className: "rss-field-label"}, "Environment"),
+            h(
+              "select",
+              {
+                className: "rss-input rss-select",
+                value: form.environment,
+                onChange: (event) => onChange({environment: event.target.value}),
+              },
+              environments.map((environment) => h("option", {key: environment.id, value: environment.id}, environment.label)),
+            ),
+          ),
+          h(
+            "label",
+            {className: "rss-field"},
+            h("span", {className: "rss-field-label"}, "Brand"),
+            h("input", {
+              className: "rss-input",
+              value: form.brand,
+              placeholder: "xpl",
+              onChange: (event) => onChange({brand: event.target.value}),
+            }),
+          ),
+          h(
+            "label",
+            {className: "rss-field"},
+            h("span", {className: "rss-field-label"}, "Operator Token"),
+            h("input", {
+              className: "rss-input",
+              type: "password",
+              value: form.operator_token,
+              placeholder: isEdit ? "Leave blank to keep current token" : "op_...",
+              onChange: (event) => onChange({operator_token: event.target.value}),
+            }),
+          ),
         ),
-        h(
-          "label",
-          {className: "rss-field"},
-          h("span", {className: "rss-field-label"}, "Operator Token"),
-          h("input", {
-            className: "rss-input",
-            type: "password",
-            value: form.operator_token,
-            placeholder: isEdit ? "Leave blank to keep current token" : "op_...",
-            onChange: (event) => onChange({operator_token: event.target.value}),
-          }),
-        ),
+        testResult ? h("div", {className: "rss-session"}, testResult) : null,
       ),
-      testResult ? h("div", {className: "rss-session"}, testResult) : null,
     );
   }
 
@@ -351,7 +372,6 @@
           : "";
       setActiveProfileId(nextActive);
       rememberProfileId(nextActive);
-      setSetupOpen(!nextProfiles.length);
       if (!nextProfiles.length) {
         setQueue([]);
         resetSelection();
@@ -442,6 +462,7 @@
     const openNewProfile = useCallback(() => {
       setProfileForm(defaultProfileForm(config));
       setProfileTestResult("");
+      setError("");
       setSetupOpen(true);
     }, [config]);
 
@@ -454,6 +475,7 @@
         operator_token: "",
       });
       setProfileTestResult("");
+      setError("");
       setSetupOpen(true);
     }, [selectedProfile]);
 
@@ -644,6 +666,18 @@
     }, [activeProfileId, loadQueue, pollEnabled]);
 
     useEffect(() => {
+      if (!setupOpen) return undefined;
+      const onKeyDown = (event) => {
+        if (event.key === "Escape" && !profileSaving && !profileTesting) {
+          setSetupOpen(false);
+          setProfileTestResult("");
+        }
+      };
+      window.addEventListener("keydown", onKeyDown);
+      return () => window.removeEventListener("keydown", onKeyDown);
+    }, [profileSaving, profileTesting, setupOpen]);
+
+    useEffect(() => {
       const originalTitle = document.title;
       const count = openCount + claimedCount;
       if (count > 0) document.title = `(${count}) Ruby Support`;
@@ -692,7 +726,7 @@
           h(Button, {onClick: enableBrowserAlerts}, alertsEnabled ? "Alerts on" : "Enable alerts"),
         ),
       ),
-      error ? h("div", {className: "rss-error"}, error) : null,
+      error && !setupOpen ? h("div", {className: "rss-error"}, error) : null,
       newTaskIds.length
         ? h("div", {className: "rss-alert"}, `${newTaskIds.length} new handoff${newTaskIds.length > 1 ? "s" : ""} waiting in the queue.`)
         : null,
@@ -700,9 +734,11 @@
         ? h(ProfileForm, {
             config,
             form: profileForm,
+            hasProfiles: profiles.length > 0,
             saving: profileSaving,
             testing: profileTesting,
             testResult: profileTestResult,
+            errorMessage: error,
             onChange: (patch) => setProfileForm((current) => ({...current, ...patch})),
             onCancel: () => {
               setSetupOpen(false);
@@ -789,13 +825,13 @@
             : h(
                 "div",
                 {className: "rss-empty rss-empty-large"},
-                h("h2", null, selectedProfile ? "Select a handoff" : "Setup required"),
+                h("h2", null, selectedProfile ? "Select a handoff" : "No profile selected"),
                 h(
                   "p",
                   null,
                   selectedProfile
                     ? "Select one to review context, claim it, and start a local Hermes session."
-                    : "Add Environment, Brand, and Operator Token.",
+                    : "Use Add profile to connect a brand.",
                 ),
               ),
         ),
