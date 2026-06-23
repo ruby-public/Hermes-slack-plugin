@@ -290,6 +290,74 @@
     );
   }
 
+  function KnowledgePanel({task, show, onToggle}) {
+    const sources = Array.isArray(task && task.sources) ? task.sources : [];
+    const resultText = safeValue(task && task.suggested_reply).trim();
+    return h(
+      "section",
+      {className: "rss-tool-panel"},
+      h(
+        "div",
+        {className: "rss-subsection-head"},
+        h(
+          "div",
+          null,
+          h("h3", null, "FAQ / search result"),
+          h("p", null, sources.length ? `${sources.length} source${sources.length === 1 ? "" : "s"} found` : `${task.reason || "handoff"} · not a reply draft`),
+        ),
+        h(Button, {onClick: onToggle}, show ? "Hide" : "View"),
+      ),
+      show
+        ? h(
+            "div",
+            {className: "rss-knowledge-body"},
+            resultText ? h(Field, {label: "Search result summary", value: resultText, multiline: true}) : h("div", {className: "rss-empty"}, "No FAQ result available."),
+            sources.length
+              ? h(
+                  "div",
+                  {className: "rss-source-list"},
+                  sources.slice(0, 5).map((source, index) => {
+                    const meta = source && source.source && typeof source.source === "object" ? source.source : {};
+                    return h(
+                      "div",
+                      {className: "rss-source", key: source.id || index},
+                      h("strong", null, meta.title || source.id || `Source ${index + 1}`),
+                      h("span", null, `Score ${typeof source.score === "number" ? source.score.toFixed(3) : safeValue(source.score) || "n/a"}`),
+                    );
+                  }),
+                )
+              : null,
+          )
+        : null,
+    );
+  }
+
+  function ReplyComposer({value, disabled, busy, onChange, onSendReply, onSaveNote, onSendAndComplete}) {
+    return h(
+      "section",
+      {className: "rss-reply-panel"},
+      h(
+        "div",
+        {className: "rss-subsection-head"},
+        h("div", null, h("h3", null, "Reply"), h("p", null, "Review carefully before sending to Chatwoot")),
+      ),
+      h("textarea", {
+        className: "rss-input rss-reply-textarea",
+        value,
+        placeholder: "Write the customer reply here, or paste a draft from Hermes...",
+        disabled,
+        onChange: (event) => onChange(event.target.value),
+      }),
+      h(
+        "div",
+        {className: "rss-reply-actions"},
+        h(Button, {kind: "primary", disabled: disabled || busy || !value.trim(), onClick: onSendReply}, busy === "reply" ? "Sending" : "Send reply"),
+        h(Button, {disabled: disabled || busy || !value.trim(), onClick: onSendAndComplete}, busy === "reply-complete" ? "Sending" : "Send & complete"),
+        h(Button, {disabled: disabled || busy || !value.trim(), onClick: onSaveNote}, busy === "note" ? "Saving" : "Save private note"),
+      ),
+    );
+  }
+
   function QueueRow({task, selected, isNew, onSelect}) {
     const context = taskContext(task);
     const tone = task.status === "open" ? "open" : task.status === "claimed" ? "claimed" : "neutral";
@@ -418,6 +486,9 @@
     const [actionBusy, setActionBusy] = useState("");
     const [error, setError] = useState("");
     const [showPrompt, setShowPrompt] = useState(false);
+    const [showKnowledge, setShowKnowledge] = useState(false);
+    const [replyText, setReplyText] = useState("");
+    const [replyBusy, setReplyBusy] = useState("");
     const [lastRefresh, setLastRefresh] = useState("");
     const [newTaskIds, setNewTaskIds] = useState([]);
     const [sessionId, setSessionId] = useState("");
@@ -452,6 +523,8 @@
       setSelectedId("");
       setTaskData(null);
       setShowPrompt(false);
+      setShowKnowledge(false);
+      setReplyText("");
       setRunLines([]);
       setSessionId("");
       updateUrlTaskId("");
@@ -563,6 +636,8 @@
           setTaskData(response);
           setSelectedId(cleanId);
           setShowPrompt(false);
+          setShowKnowledge(false);
+          setReplyText("");
           updateUrlTaskId(cleanId);
           setNewTaskIds((current) => current.filter((taskId) => taskId !== cleanId));
         } catch (nextError) {
@@ -599,6 +674,39 @@
         }
       },
       [activeProfileId, appendRunLine, mergeQueueTask, task],
+    );
+
+    const sendHandoffReply = useCallback(
+      async (mode) => {
+        if (!task || !activeProfileId) return;
+        const content = replyText.trim();
+        if (!content) return;
+        const busyKey = mode === "note" ? "note" : mode === "complete" ? "reply-complete" : "reply";
+        setReplyBusy(busyKey);
+        setError("");
+        try {
+          const response = await apiFetch(withProfile(`/handoffs/${encodeURIComponent(task.task_id)}/reply`, activeProfileId), {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({
+              content,
+              private_note: mode === "note",
+              complete: mode === "complete",
+            }),
+          });
+          setTaskData(response);
+          mergeQueueTask(response.task);
+          setReplyText("");
+          appendRunLine(mode === "note" ? "Private note saved." : mode === "complete" ? "Reply sent and handoff completed." : "Reply sent.");
+          if (mode === "complete") loadQueue({silent: true, detectNew: false});
+        } catch (nextError) {
+          setError(formatDetail(nextError));
+          appendRunLine(`Reply failed: ${formatDetail(nextError)}`);
+        } finally {
+          setReplyBusy("");
+        }
+      },
+      [activeProfileId, appendRunLine, loadQueue, mergeQueueTask, replyText, task],
     );
 
     const openNewProfile = useCallback(() => {
@@ -690,7 +798,7 @@
     const copyPrompt = useCallback(async () => {
       if (!prompt) return;
       await navigator.clipboard.writeText(prompt);
-      appendRunLine("Prompt copied to clipboard.");
+      appendRunLine("Context copied to clipboard.");
     }, [appendRunLine, prompt]);
 
     const enableBrowserAlerts = useCallback(async () => {
@@ -831,6 +939,7 @@
     const canClaim = task && task.status === "open";
     const canRelease = task && task.status === "claimed";
     const canComplete = task && task.status !== "completed";
+    const canReply = task && task.status !== "completed";
 
     return h(
       "div",
@@ -921,12 +1030,12 @@
                 h(
                   "div",
                   {className: "rss-section-head"},
-                  h("div", null, h("h2", null, "Handoff"), h("p", null, loadingTask ? "Loading task..." : task.task_id)),
+                  h("div", null, h("h2", null, `Conversation #${task.conversation_id || ""}`), h("p", null, loadingTask ? "Loading task..." : task.task_id)),
                   h(
                     "div",
                     {className: "rss-actions"},
                     context.conversation_url ? h(Button, {href: context.conversation_url}, "Open Chatwoot") : null,
-                    h(Button, {onClick: copyPrompt}, "Copy prompt"),
+                    h(Button, {onClick: copyPrompt}, "Copy context"),
                     canClaim ? h(Button, {disabled: actionBusy === "claim", onClick: () => runTaskAction("claim")}, actionBusy === "claim" ? "Claiming" : "Claim") : null,
                     canRelease ? h(Button, {disabled: actionBusy === "release", onClick: () => runTaskAction("release")}, actionBusy === "release" ? "Releasing" : "Release") : null,
                     canComplete
@@ -945,24 +1054,28 @@
                   h(
                     "div",
                     {className: "rss-subsection-head"},
-                    h("div", null, h("h3", null, "Conversation"), h("p", null, `${messages.length} message${messages.length === 1 ? "" : "s"} from Worker history`)),
+                    h("div", null, h("h3", null, "Conversation"), h("p", null, `${messages.length} message${messages.length === 1 ? "" : "s"} · full context for Hermes`)),
                     context.conversation_url ? h(Button, {href: context.conversation_url}, "Open full Chatwoot") : null,
                   ),
                   h(ConversationThread, {messages}),
                 ),
+                h(ReplyComposer, {
+                  value: replyText,
+                  disabled: !canReply,
+                  busy: replyBusy,
+                  onChange: setReplyText,
+                  onSendReply: () => sendHandoffReply("reply"),
+                  onSaveNote: () => sendHandoffReply("note"),
+                  onSendAndComplete: () => sendHandoffReply("complete"),
+                }),
+                h(KnowledgePanel, {task, show: showKnowledge, onToggle: () => setShowKnowledge((value) => !value)}),
                 h(
-                  "div",
-                  {className: "rss-grid rss-response-grid"},
-                  h(Field, {label: "Customer message", value: task.user_message || "", multiline: true}),
-                  h(Field, {label: "Suggested reply", value: task.suggested_reply || "", multiline: true}),
-                ),
-                h(
-                  "div",
-                  {className: "rss-prompt-panel"},
+                  "section",
+                  {className: "rss-tool-panel"},
                   h(
                     "div",
                     {className: "rss-subsection-head"},
-                    h("div", null, h("h3", null, "Hermes prompt"), h("p", null, "Used when starting a local Hermes session")),
+                    h("div", null, h("h3", null, "Hermes prompt"), h("p", null, "Includes conversation history and task metadata")),
                     h(Button, {onClick: () => setShowPrompt((value) => !value)}, showPrompt ? "Hide prompt" : "View prompt"),
                   ),
                   showPrompt ? h(Field, {label: "Prompt preview", value: prompt, multiline: true}) : null,

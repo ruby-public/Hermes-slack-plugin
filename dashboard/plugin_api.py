@@ -15,7 +15,7 @@ from fastapi import APIRouter, HTTPException, Query
 router = APIRouter()
 
 PLUGIN_NAME = "ruby-slack-support"
-PLUGIN_VERSION = "0.3.8"
+PLUGIN_VERSION = "0.3.9"
 WORKER_REQUEST_ATTEMPTS = 3
 MAX_PROMPT_JSON_CHARS = 14000
 DEFAULT_SITE = "main"
@@ -23,11 +23,11 @@ DEFAULT_LANGUAGE = "ko"
 ENVIRONMENTS: dict[str, dict[str, str]] = {
     "production": {
         "label": "Production",
-        "api_base_url": "https://aihub-rag-faq-worker.imdp05292.workers.dev",
+        "api_base_url": "https://aihub-chatwoot-support-worker.imdp05292.workers.dev",
     },
     "staging": {
         "label": "Staging",
-        "api_base_url": "https://aihub-rag-faq-worker-staging.imdp05292.workers.dev",
+        "api_base_url": "https://aihub-chatwoot-support-worker-staging.imdp05292.workers.dev",
     },
 }
 
@@ -378,14 +378,14 @@ def _build_prompt(task: dict[str, Any]) -> str:
         f"- Risk flags: {risk_flags}",
         f"- Chatwoot conversation: {context.get('conversation_url') or task.get('conversation_id') or 'n/a'}",
         "",
-        "Customer message:",
-        str(task.get("user_message") or "").strip() or "(empty)",
-        "",
-        "Existing suggested reply:",
-        str(task.get("suggested_reply") or "").strip() or "(none)",
-        "",
         "Conversation history:",
         "\n".join(message_lines) if message_lines else "(not available from Worker history)",
+        "",
+        "Latest handoff trigger (not the full context):",
+        str(task.get("user_message") or "").strip() or "(empty)",
+        "",
+        "FAQ/search result (not a final customer reply):",
+        str(task.get("suggested_reply") or "").strip() or "(none)",
         "",
         "Top sources:",
         "\n".join(source_lines) if source_lines else "(none)",
@@ -631,6 +631,11 @@ def complete_handoff(task_id: str, payload: dict[str, Any] | None = None, profil
     return _handoff_action(task_id, "complete", profile_id, payload or {})
 
 
+@router.post("/handoffs/{task_id}/reply")
+def reply_handoff(task_id: str, payload: dict[str, Any] | None = None, profile_id: str | None = Query(default=None)) -> dict[str, Any]:
+    return _handoff_action(task_id, "reply", profile_id, payload or {})
+
+
 def _handoff_action(task_id: str, action: str, profile_id: str | None = None, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     profile = _select_profile(profile_id)
     safe_task_id = quote(task_id, safe="")
@@ -649,4 +654,7 @@ def _handoff_action(task_id: str, action: str, profile_id: str | None = None, pa
         "task": task,
         "prompt": _build_prompt(task),
         "profile": _redact_profile(profile),
+        "sent": bool(response.get("sent")),
+        "private_note": bool(response.get("private_note")),
+        "completed": bool(response.get("completed")),
     }
