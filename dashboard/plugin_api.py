@@ -15,7 +15,7 @@ from fastapi import APIRouter, HTTPException, Query
 router = APIRouter()
 
 PLUGIN_NAME = "ruby-slack-support"
-PLUGIN_VERSION = "0.3.9"
+PLUGIN_VERSION = "0.3.10"
 WORKER_REQUEST_ATTEMPTS = 3
 MAX_PROMPT_JSON_CHARS = 14000
 DEFAULT_SITE = "main"
@@ -655,6 +655,5 @@ def _handoff_action(task_id: str, action: str, profile_id: str | None = None, pa
         "prompt": _build_prompt(task),
         "profile": _redact_profile(profile),
         "sent": bool(response.get("sent")),
-        "private_note": bool(response.get("private_note")),
         "completed": bool(response.get("completed")),
     }

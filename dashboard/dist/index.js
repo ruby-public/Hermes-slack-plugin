@@ -332,7 +332,7 @@
     );
   }
 
-  function ReplyComposer({value, disabled, busy, onChange, onSendReply, onSaveNote, onSendAndComplete}) {
+  function ReplyComposer({value, disabled, busy, onChange, onSendReply, onSendAndComplete}) {
     return h(
       "section",
       {className: "rss-reply-panel"},
@@ -353,7 +353,6 @@
         {className: "rss-reply-actions"},
         h(Button, {kind: "primary", disabled: disabled || busy || !value.trim(), onClick: onSendReply}, busy === "reply" ? "Sending" : "Send reply"),
         h(Button, {disabled: disabled || busy || !value.trim(), onClick: onSendAndComplete}, busy === "reply-complete" ? "Sending" : "Send & complete"),
-        h(Button, {disabled: disabled || busy || !value.trim(), onClick: onSaveNote}, busy === "note" ? "Saving" : "Save private note"),
       ),
     );
   }
@@ -681,7 +680,7 @@
         if (!task || !activeProfileId) return;
         const content = replyText.trim();
         if (!content) return;
-        const busyKey = mode === "note" ? "note" : mode === "complete" ? "reply-complete" : "reply";
+        const busyKey = mode === "complete" ? "reply-complete" : "reply";
         setReplyBusy(busyKey);
         setError("");
         try {
@@ -690,14 +689,13 @@
             headers: {"Content-Type": "application/json"},
             body: JSON.stringify({
               content,
-              private_note: mode === "note",
               complete: mode === "complete",
             }),
           });
           setTaskData(response);
           mergeQueueTask(response.task);
           setReplyText("");
-          appendRunLine(mode === "note" ? "Private note saved." : mode === "complete" ? "Reply sent and handoff completed." : "Reply sent.");
+          appendRunLine(mode === "complete" ? "Reply sent and handoff completed." : "Reply sent.");
           if (mode === "complete") loadQueue({silent: true, detectNew: false});
         } catch (nextError) {
           setError(formatDetail(nextError));
@@ -1065,7 +1063,6 @@
                   busy: replyBusy,
                   onChange: setReplyText,
                   onSendReply: () => sendHandoffReply("reply"),
-                  onSaveNote: () => sendHandoffReply("note"),
                   onSendAndComplete: () => sendHandoffReply("complete"),
                 }),
                 h(KnowledgePanel, {task, show: showKnowledge, onToggle: () => setShowKnowledge((value) => !value)}),
