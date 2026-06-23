@@ -15,7 +15,8 @@ from fastapi import APIRouter, HTTPException, Query
 router = APIRouter()
 
 PLUGIN_NAME = "ruby-slack-support"
-PLUGIN_VERSION = "0.3.6"
+PLUGIN_VERSION = "0.3.7"
+WORKER_REQUEST_ATTEMPTS = 3
 MAX_PROMPT_JSON_CHARS = 14000
 DEFAULT_SITE = "main"
 DEFAULT_LANGUAGE = "ko"
@@ -239,6 +240,7 @@ def _worker_json(
     headers = {
         "Accept": "application/json",
         "Authorization": f"Bearer {profile['operator_token']}",
+        "Connection": "close",
         "User-Agent": f"{PLUGIN_NAME}/{PLUGIN_VERSION}",
     }
     if payload is not None:
@@ -252,29 +254,48 @@ def _worker_json(
         method=method,
     )
 
-    try:
-        with urlopen(request, timeout=12) as response:
-            body = response.read().decode("utf-8")
-    except HTTPError as error:
-        body = error.read().decode("utf-8", errors="replace")
-        raise HTTPException(
-            status_code=error.code,
-            detail={
-                "code": "ruby_support_worker_error",
-                "message": "The support Worker rejected the handoff request.",
-                "status": error.code,
-                "body": _parse_json_or_text(body),
-            },
-        ) from error
-    except URLError as error:
+    last_url_error: URLError | None = None
+    for attempt in range(WORKER_REQUEST_ATTEMPTS):
+        try:
+            with urlopen(request, timeout=12) as response:
+                body = response.read().decode("utf-8")
+            last_url_error = None
+            break
+        except HTTPError as error:
+            body = error.read().decode("utf-8", errors="replace")
+            raise HTTPException(
+                status_code=error.code,
+                detail={
+                    "code": "ruby_support_worker_error",
+                    "message": "The support Worker rejected the handoff request.",
+                    "status": error.code,
+                    "body": _parse_json_or_text(body),
+                },
+            ) from error
+        except URLError as error:
+            last_url_error = error
+            if attempt + 1 < WORKER_REQUEST_ATTEMPTS:
+                time.sleep(0.25 * (attempt + 1))
+                continue
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "code": "ruby_support_worker_unreachable",
+                    "message": "Could not reach the support Worker from local Hermes after retrying.",
+                    "attempts": WORKER_REQUEST_ATTEMPTS,
+                    "reason": str(error.reason),
+                },
+            ) from error
+
+    if last_url_error is not None:
         raise HTTPException(
             status_code=502,
             detail={
                 "code": "ruby_support_worker_unreachable",
                 "message": "Could not reach the support Worker from local Hermes.",
-                "reason": str(error.reason),
+                "reason": str(last_url_error.reason),
             },
-        ) from error
+        )
 
     parsed = _parse_json_or_text(body)
     if not isinstance(parsed, dict):
