@@ -271,6 +271,18 @@
     return h(
       "div",
       {className: "rss-profile-controls"},
+      h(
+        "div",
+        {className: "rss-profile-header"},
+        h("span", {className: "rss-profile-title"}, "Profiles"),
+        h(
+          "div",
+          {className: "rss-profile-buttons rss-profile-buttons-top"},
+          h(Button, {onClick: onAdd}, "Add profile"),
+          selectedProfile && !selectedProfile.read_only ? h(Button, {onClick: onEdit}, "Edit") : null,
+          selectedProfile && !selectedProfile.read_only ? h(Button, {onClick: onRemove}, "Remove") : null,
+        ),
+      ),
       h(ConfigBanner, {profile: selectedProfile, hasProfiles: profiles.length > 0}),
       profiles.length
         ? h(
@@ -291,13 +303,6 @@
             ),
           )
         : null,
-      h(
-        "div",
-        {className: "rss-profile-buttons"},
-        h(Button, {onClick: onAdd}, "Add"),
-        selectedProfile && !selectedProfile.read_only ? h(Button, {onClick: onEdit}, "Edit") : null,
-        selectedProfile && !selectedProfile.read_only ? h(Button, {onClick: onRemove}, "Remove") : null,
-      ),
     );
   }
 

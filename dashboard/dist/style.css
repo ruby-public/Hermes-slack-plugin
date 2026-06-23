@@ -249,9 +249,27 @@
   padding: 10px;
 }
 
+.rss-profile-header {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.rss-profile-title {
+  color: rgba(255, 244, 222, 0.9);
+  font-size: 13px;
+  font-weight: 600;
+}
+
 .rss-profile-buttons {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
+}
+
+.rss-profile-buttons-top {
+  justify-content: flex-end;
 }
 
 .rss-review-notice {
@@ -308,6 +326,17 @@
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+@media (max-width: 720px) {
+  .rss-profile-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .rss-profile-buttons-top {
+    justify-content: flex-start;
+  }
 }
 
 .rss-list {
