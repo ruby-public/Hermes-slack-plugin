@@ -15,7 +15,7 @@ from fastapi import APIRouter, HTTPException, Query
 router = APIRouter()
 
 PLUGIN_NAME = "ruby-slack-support"
-PLUGIN_VERSION = "0.3.4"
+PLUGIN_VERSION = "0.3.5"
 MAX_PROMPT_JSON_CHARS = 14000
 DEFAULT_SITE = "main"
 DEFAULT_LANGUAGE = "ko"

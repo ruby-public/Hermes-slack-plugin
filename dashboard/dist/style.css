@@ -231,7 +231,7 @@
 .rss-profile-form {
   display: grid;
   gap: 12px;
-  grid-template-columns: minmax(160px, 0.8fr) minmax(160px, 0.8fr) minmax(240px, 1.2fr);
+  grid-template-columns: 1fr;
 }
 
 .rss-modal-backdrop {
@@ -257,10 +257,10 @@
   flex-direction: column;
   gap: 14px;
   max-height: min(640px, calc(100dvh - 150px));
-  max-width: 920px;
+  max-width: 880px;
   overflow: auto;
   padding: 16px;
-  width: min(920px, calc(100% - 12px));
+  width: min(880px, calc(100% - 12px));
 }
 
 .rss-modal-banner {
@@ -394,10 +394,6 @@
   }
 
   .rss-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .rss-profile-form {
     grid-template-columns: 1fr;
   }
 
