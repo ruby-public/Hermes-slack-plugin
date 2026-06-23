@@ -119,7 +119,53 @@
       ["Confidence", typeof task.confidence === "number" ? task.confidence.toFixed(2) : task.confidence],
       ["Knowledge", task.knowledge_state],
       ["Created", task.created_at],
+      ["Updated", task.updated_at],
     ].filter((item) => item[1] !== undefined && item[1] !== null && item[1] !== "");
+  }
+
+  function formatDateTime(value) {
+    if (!value) return "";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value);
+    return date.toLocaleString([], {month: "short", day: "numeric", hour: "2-digit", minute: "2-digit"});
+  }
+
+  function conversationMessages(taskData, task) {
+    const messages =
+      taskData &&
+      taskData.task &&
+      taskData.task.conversation &&
+      Array.isArray(taskData.task.conversation.messages)
+        ? taskData.task.conversation.messages
+        : [];
+    if (messages.length) return messages;
+    if (!task || !task.user_message) return [];
+    return [
+      {
+        message_id: task.message_id || task.task_id,
+        message_type: "incoming",
+        content: task.user_message,
+        created_at: task.updated_at || task.created_at,
+      },
+    ];
+  }
+
+  function messageTone(message) {
+    if (message && message.private) return "private";
+    const type = String((message && (message.message_type || message.sender_type)) || "").toLowerCase();
+    if (type.includes("outgoing") || type.includes("agent") || type.includes("user")) return "outgoing";
+    if (type.includes("incoming") || type.includes("contact") || type.includes("customer")) return "incoming";
+    return "neutral";
+  }
+
+  function messageLabel(message) {
+    if (!message) return "Message";
+    if (message.private) return "Private note";
+    if (message.sender_name) return message.sender_name;
+    const tone = messageTone(message);
+    if (tone === "incoming") return "Customer";
+    if (tone === "outgoing") return "Support";
+    return message.message_type || message.sender_type || "Message";
   }
 
   function Button({children, kind = "secondary", disabled, onClick, href, title, type = "button"}) {
@@ -174,6 +220,74 @@
       );
     }
     return null;
+  }
+
+  function ProfileControls({
+    profiles,
+    selectedProfile,
+    activeProfileId,
+    loadingQueue,
+    onActivate,
+    onAdd,
+    onEdit,
+    onRemove,
+  }) {
+    return h(
+      "div",
+      {className: "rss-profile-controls"},
+      h(ConfigBanner, {profile: selectedProfile, hasProfiles: profiles.length > 0}),
+      profiles.length
+        ? h(
+            "label",
+            {className: "rss-profile-picker rss-profile-picker-wide"},
+            h("span", null, "Profile"),
+            h(
+              "select",
+              {
+                className: "rss-input rss-select",
+                value: activeProfileId,
+                disabled: loadingQueue,
+                onChange: (event) => onActivate(event.target.value),
+              },
+              profiles.map((profile) =>
+                h("option", {key: profile.id, value: profile.id}, `${profile.brand} / ${profile.environment_label || profile.environment}`),
+              ),
+            ),
+          )
+        : null,
+      h(
+        "div",
+        {className: "rss-profile-buttons"},
+        h(Button, {onClick: onAdd}, "Add"),
+        selectedProfile && !selectedProfile.read_only ? h(Button, {onClick: onEdit}, "Edit") : null,
+        selectedProfile && !selectedProfile.read_only ? h(Button, {onClick: onRemove}, "Remove") : null,
+      ),
+    );
+  }
+
+  function ConversationThread({messages}) {
+    if (!messages.length) {
+      return h("div", {className: "rss-empty"}, "No conversation history available yet.");
+    }
+    return h(
+      "div",
+      {className: "rss-thread"},
+      messages.map((message, index) => {
+        const tone = messageTone(message);
+        const key = message.message_id || message.event_id || `${tone}-${index}`;
+        return h(
+          "div",
+          {key, className: `rss-message rss-message-${tone}`},
+          h(
+            "div",
+            {className: "rss-message-meta"},
+            h("span", null, messageLabel(message)),
+            h("span", null, formatDateTime(message.created_at || message.received_at)),
+          ),
+          h("div", {className: "rss-message-body"}, message.content || "(empty)"),
+        );
+      }),
+    );
   }
 
   function QueueRow({task, selected, isNew, onSelect}) {
@@ -303,6 +417,7 @@
     const [loadingTask, setLoadingTask] = useState(false);
     const [actionBusy, setActionBusy] = useState("");
     const [error, setError] = useState("");
+    const [showPrompt, setShowPrompt] = useState(false);
     const [lastRefresh, setLastRefresh] = useState("");
     const [newTaskIds, setNewTaskIds] = useState([]);
     const [sessionId, setSessionId] = useState("");
@@ -316,6 +431,7 @@
     );
     const task = taskData && taskData.task ? taskData.task : null;
     const prompt = taskData && taskData.prompt ? taskData.prompt : "";
+    const messages = conversationMessages(taskData, task);
     const context = taskContext(task);
     const openCount = queue.filter((item) => item.status === "open").length;
     const claimedCount = queue.filter((item) => item.status === "claimed").length;
@@ -335,6 +451,7 @@
     const resetSelection = useCallback(() => {
       setSelectedId("");
       setTaskData(null);
+      setShowPrompt(false);
       setRunLines([]);
       setSessionId("");
       updateUrlTaskId("");
@@ -445,6 +562,7 @@
           const response = await apiFetch(withProfile(`/handoffs/${encodeURIComponent(cleanId)}`, activeProfileId));
           setTaskData(response);
           setSelectedId(cleanId);
+          setShowPrompt(false);
           updateUrlTaskId(cleanId);
           setNewTaskIds((current) => current.filter((taskId) => taskId !== cleanId));
         } catch (nextError) {
@@ -724,28 +842,6 @@
         h(
           "div",
           {className: "rss-header-actions"},
-          h(ConfigBanner, {profile: selectedProfile, hasProfiles: profiles.length > 0}),
-          profiles.length
-            ? h(
-                "label",
-                {className: "rss-profile-picker"},
-                h("span", null, "Profile"),
-                h(
-                  "select",
-                  {
-                    className: "rss-input rss-select",
-                    value: activeProfileId,
-                    onChange: (event) => activateProfile(event.target.value),
-                  },
-                  profiles.map((profile) =>
-                    h("option", {key: profile.id, value: profile.id}, `${profile.brand} / ${profile.environment_label || profile.environment}`),
-                  ),
-                ),
-              )
-            : null,
-          h(Button, {onClick: openNewProfile}, "Add profile"),
-          selectedProfile && !selectedProfile.read_only ? h(Button, {onClick: openEditProfile}, "Edit") : null,
-          selectedProfile && !selectedProfile.read_only ? h(Button, {onClick: deleteSelectedProfile}, "Remove") : null,
           h(Button, {onClick: () => setPollEnabled((value) => !value)}, pollEnabled ? "Polling on" : "Polling off"),
           h(Button, {onClick: enableBrowserAlerts}, alertsEnabled ? "Alerts on" : "Enable alerts"),
         ),
@@ -789,9 +885,16 @@
             ),
             h(Button, {disabled: loadingQueue || !selectedProfile, onClick: () => loadQueue({silent: false, detectNew: false})}, loadingQueue ? "Loading" : "Refresh"),
           ),
-          selectedProfile
-            ? h("div", {className: "rss-scope-line"}, h(Chip, null, selectedProfile.brand), h(Chip, null, selectedProfile.environment_label || selectedProfile.environment))
-            : null,
+          h(ProfileControls, {
+            profiles,
+            selectedProfile,
+            activeProfileId,
+            loadingQueue,
+            onActivate: activateProfile,
+            onAdd: openNewProfile,
+            onEdit: openEditProfile,
+            onRemove: deleteSelectedProfile,
+          }),
           queue.length
             ? h(
                 "div",
@@ -837,12 +940,33 @@
                   ? h("div", {className: "rss-risk"}, task.risk_flags.map((flag) => h(Chip, {key: flag, tone: "risk"}, flag)))
                   : null,
                 h(
+                  "section",
+                  {className: "rss-conversation-block"},
+                  h(
+                    "div",
+                    {className: "rss-subsection-head"},
+                    h("div", null, h("h3", null, "Conversation"), h("p", null, `${messages.length} message${messages.length === 1 ? "" : "s"} from Worker history`)),
+                    context.conversation_url ? h(Button, {href: context.conversation_url}, "Open full Chatwoot") : null,
+                  ),
+                  h(ConversationThread, {messages}),
+                ),
+                h(
                   "div",
-                  {className: "rss-grid"},
+                  {className: "rss-grid rss-response-grid"},
                   h(Field, {label: "Customer message", value: task.user_message || "", multiline: true}),
                   h(Field, {label: "Suggested reply", value: task.suggested_reply || "", multiline: true}),
                 ),
-                h(Field, {label: "Prompt preview", value: prompt, multiline: true}),
+                h(
+                  "div",
+                  {className: "rss-prompt-panel"},
+                  h(
+                    "div",
+                    {className: "rss-subsection-head"},
+                    h("div", null, h("h3", null, "Hermes prompt"), h("p", null, "Used when starting a local Hermes session")),
+                    h(Button, {onClick: () => setShowPrompt((value) => !value)}, showPrompt ? "Hide prompt" : "View prompt"),
+                  ),
+                  showPrompt ? h(Field, {label: "Prompt preview", value: prompt, multiline: true}) : null,
+                ),
                 sessionId ? h("div", {className: "rss-session"}, "Session: ", h("code", null, sessionId)) : null,
                 runLines.length ? h("div", {className: "rss-log"}, runLines.map((line, index) => h("div", {key: `${line}-${index}`}, line))) : null,
               )

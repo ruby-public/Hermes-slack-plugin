@@ -12,6 +12,7 @@
 .rss-header,
 .rss-header-actions,
 .rss-section-head,
+.rss-subsection-head,
 .rss-actions,
 .rss-meta,
 .rss-risk,
@@ -23,11 +24,13 @@
 }
 
 .rss-header,
-.rss-section-head {
+.rss-section-head,
+.rss-subsection-head {
   justify-content: space-between;
 }
 
 .rss-header-actions,
+.rss-profile-buttons,
 .rss-actions,
 .rss-meta,
 .rss-risk,
@@ -37,6 +40,7 @@
 
 .rss-header h1,
 .rss-section-head h2,
+.rss-subsection-head h3,
 .rss-empty-large h2 {
   font-size: 20px;
   font-weight: 650;
@@ -45,8 +49,13 @@
   margin: 0;
 }
 
+.rss-subsection-head h3 {
+  font-size: 15px;
+}
+
 .rss-header p,
 .rss-section-head p,
+.rss-subsection-head p,
 .rss-empty-large p {
   color: var(--text-secondary, #a8a0bc);
   font-size: 13px;
@@ -56,7 +65,7 @@
 .rss-workbench {
   display: grid;
   gap: 14px;
-  grid-template-columns: minmax(320px, 0.92fr) minmax(0, 1.6fr);
+  grid-template-columns: minmax(340px, 0.86fr) minmax(0, 1.7fr);
   min-height: 680px;
 }
 
@@ -78,6 +87,7 @@
 
 .rss-detail-panel {
   min-height: 620px;
+  overflow: hidden;
 }
 
 .rss-field,
@@ -198,8 +208,8 @@
   display: inline-flex;
   font-size: 12px;
   line-height: 1.2;
+  overflow-wrap: anywhere;
   padding: 4px 7px;
-  white-space: nowrap;
 }
 
 .rss-banner-ok {
@@ -226,6 +236,26 @@
 
 .rss-profile-picker {
   min-width: 190px;
+}
+
+.rss-profile-picker-wide {
+  min-width: 0;
+  width: 100%;
+}
+
+.rss-profile-controls {
+  background: rgba(0, 0, 0, 0.16);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px;
+}
+
+.rss-profile-buttons {
+  display: flex;
+  gap: 8px;
 }
 
 .rss-profile-form {
@@ -282,6 +312,79 @@
   min-height: 0;
   overflow: auto;
   padding-right: 2px;
+}
+
+.rss-conversation-block,
+.rss-prompt-panel {
+  border-top: 1px solid rgba(255, 255, 255, 0.09);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  padding-top: 12px;
+}
+
+.rss-thread {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 10px;
+  max-height: min(390px, 45vh);
+  min-height: 180px;
+  overflow: auto;
+  padding: 2px 4px 4px;
+}
+
+.rss-message {
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 82%;
+  padding: 10px 12px;
+}
+
+.rss-message-incoming {
+  align-self: flex-start;
+  background: rgba(255, 255, 255, 0.055);
+}
+
+.rss-message-outgoing {
+  align-self: flex-end;
+  background: rgba(95, 164, 235, 0.13);
+  border-color: rgba(95, 164, 235, 0.24);
+}
+
+.rss-message-private {
+  align-self: center;
+  background: rgba(230, 168, 72, 0.12);
+  border-color: rgba(230, 168, 72, 0.25);
+}
+
+.rss-message-neutral {
+  align-self: flex-start;
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.rss-message-meta {
+  color: var(--text-secondary, #a8a0bc);
+  display: flex;
+  font-size: 11px;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.rss-message-body {
+  color: var(--text-primary, #f4f1ff);
+  font-size: 14px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.rss-response-grid .rss-textarea {
+  min-height: 120px;
 }
 
 .rss-row {
@@ -379,7 +482,8 @@
   }
 
   .rss-header,
-  .rss-section-head {
+  .rss-section-head,
+  .rss-subsection-head {
     align-items: stretch;
     flex-direction: column;
   }
@@ -395,6 +499,14 @@
 
   .rss-grid {
     grid-template-columns: 1fr;
+  }
+
+  .rss-thread {
+    max-height: 420px;
+  }
+
+  .rss-message {
+    max-width: 94%;
   }
 
   .rss-modal-backdrop {

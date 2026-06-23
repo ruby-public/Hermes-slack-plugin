@@ -15,7 +15,7 @@ from fastapi import APIRouter, HTTPException, Query
 router = APIRouter()
 
 PLUGIN_NAME = "ruby-slack-support"
-PLUGIN_VERSION = "0.3.7"
+PLUGIN_VERSION = "0.3.8"
 WORKER_REQUEST_ATTEMPTS = 3
 MAX_PROMPT_JSON_CHARS = 14000
 DEFAULT_SITE = "main"
@@ -329,6 +329,8 @@ def _as_list(value: Any) -> list[Any]:
 
 def _build_prompt(task: dict[str, Any]) -> str:
     context = task.get("context") if isinstance(task.get("context"), dict) else {}
+    conversation = task.get("conversation") if isinstance(task.get("conversation"), dict) else {}
+    messages = _as_list(conversation.get("messages") if isinstance(conversation, dict) else [])
     risk_flags = ", ".join(str(item) for item in _as_list(task.get("risk_flags"))) or "none"
     sources = _as_list(task.get("sources"))
     source_lines = []
@@ -340,6 +342,20 @@ def _build_prompt(task: dict[str, Any]) -> str:
         score = source.get("score")
         url = source_meta.get("url")
         source_lines.append(f"{index}. {title} | score={score} | url={url or 'n/a'}")
+
+    message_lines = []
+    for message in messages[-30:]:
+        if not isinstance(message, dict):
+            continue
+        role = message.get("message_type") or message.get("sender_type") or "message"
+        name = message.get("sender_name")
+        timestamp = message.get("created_at") or message.get("received_at") or ""
+        prefix = f"[{timestamp}] {role}"
+        if name:
+            prefix = f"{prefix} ({name})"
+        content = str(message.get("content") or "").strip()
+        if content:
+            message_lines.append(f"{prefix}: {content}")
 
     prompt_sections = [
         "You are Ruby Support, the operator's local Hermes assistant.",
@@ -367,6 +383,9 @@ def _build_prompt(task: dict[str, Any]) -> str:
         "",
         "Existing suggested reply:",
         str(task.get("suggested_reply") or "").strip() or "(none)",
+        "",
+        "Conversation history:",
+        "\n".join(message_lines) if message_lines else "(not available from Worker history)",
         "",
         "Top sources:",
         "\n".join(source_lines) if source_lines else "(none)",
