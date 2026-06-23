@@ -82,6 +82,11 @@
     };
   }
 
+  function needsBackendRestart(config) {
+    if (!config) return false;
+    return config.plugin === PLUGIN_NAME && !Array.isArray(config.profiles);
+  }
+
   async function apiFetch(path, options = {}) {
     const url = `/api/plugins/${PLUGIN_NAME}${path}`;
     const method = (options.method || "GET").toUpperCase();
@@ -194,6 +199,7 @@
   function ProfileForm({config, form, hasProfiles, saving, testing, testResult, errorMessage, onChange, onCancel, onSave, onTest}) {
     const environments = environmentOptions(config);
     const isEdit = Boolean(form.id);
+    const backendRestartRequired = needsBackendRestart(config);
     return h(
       "div",
       {
@@ -218,10 +224,17 @@
             "div",
             {className: "rss-actions"},
             h(Button, {onClick: onCancel, disabled: saving || testing}, "Cancel"),
-            h(Button, {disabled: saving || testing, onClick: onSave}, saving ? "Saving" : "Save"),
-            h(Button, {kind: "primary", disabled: saving || testing, onClick: onTest}, testing ? "Testing" : "Save & test"),
+            h(Button, {disabled: saving || testing || backendRestartRequired, onClick: onSave}, saving ? "Saving" : "Save"),
+            h(Button, {kind: "primary", disabled: saving || testing || backendRestartRequired, onClick: onTest}, testing ? "Testing" : "Save & test"),
           ),
         ),
+        backendRestartRequired
+          ? h(
+              "div",
+              {className: "rss-error"},
+              "Restart Hermes Dashboard to load the updated Ruby Support backend, then reopen this tab.",
+            )
+          : null,
         !hasProfiles && !isEdit
           ? h("div", {className: "rss-banner rss-banner-warn rss-modal-banner"}, h("span", null, "Setup required"), h("span", {className: "rss-banner-detail"}, "Environment, Brand, Token"))
           : null,
@@ -359,6 +372,16 @@
     }, []);
 
     const applyProfiles = useCallback((nextConfig) => {
+      if (needsBackendRestart(nextConfig)) {
+        setConfig(nextConfig);
+        setProfiles([]);
+        setActiveProfileId("");
+        rememberProfileId("");
+        setQueue([]);
+        resetSelection();
+        setError("Restart Hermes Dashboard to load the updated Ruby Support backend, then reopen this tab.");
+        return;
+      }
       const nextProfiles = nextConfig && nextConfig.profiles ? nextConfig.profiles : [];
       setProfiles(nextProfiles);
       setConfig(nextConfig);

@@ -40,14 +40,17 @@ mkdir -p ~/.hermes/plugins
 git clone https://github.com/ruby-public/Hermes-slack-plugin.git ~/.hermes/plugins/ruby-slack-support
 ```
 
-Then restart Hermes Dashboard, or rescan dashboard plugins:
+Then restart Hermes Dashboard. A rescan is enough for new sidebar entries, but
+backend routes in `dashboard/plugin_api.py` are imported only when Dashboard
+starts:
 
 ```bash
 curl http://127.0.0.1:9119/api/dashboard/plugins/rescan
 ```
 
-Backend routes in `dashboard/plugin_api.py` are loaded at Dashboard startup, so
-restart Dashboard after changing this file.
+If the page updates but profile setup still returns `Method Not Allowed`, the
+Dashboard is still running the previous Python backend. Fully quit and reopen
+Hermes Desktop/Dashboard once.
 
 ## Local Configuration
 
