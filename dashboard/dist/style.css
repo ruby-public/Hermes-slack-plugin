@@ -14,8 +14,6 @@
 .rss-section-head,
 .rss-subsection-head,
 .rss-actions,
-.rss-meta,
-.rss-risk,
 .rss-filters,
 .rss-row-top {
   align-items: center;
@@ -32,8 +30,6 @@
 .rss-header-actions,
 .rss-profile-buttons,
 .rss-actions,
-.rss-meta,
-.rss-risk,
 .rss-filters {
   flex-wrap: wrap;
 }
@@ -258,6 +254,16 @@
   gap: 8px;
 }
 
+.rss-review-notice {
+  background: rgba(230, 168, 72, 0.1);
+  border: 1px solid rgba(230, 168, 72, 0.24);
+  border-radius: 8px;
+  color: #f0c882;
+  font-size: 13px;
+  line-height: 1.45;
+  padding: 10px 12px;
+}
+
 .rss-profile-form {
   display: grid;
   gap: 12px;
@@ -434,6 +440,35 @@
   font-size: 12px;
 }
 
+.rss-detail-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.rss-detail-item {
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: 9px 10px;
+}
+
+.rss-detail-item span {
+  color: var(--text-secondary, #a8a0bc);
+  font-size: 11px;
+}
+
+.rss-detail-item strong {
+  color: var(--text-primary, #f4f1ff);
+  font-size: 12px;
+  font-weight: 550;
+  overflow-wrap: anywhere;
+}
+
 .rss-row {
   background: rgba(255, 255, 255, 0.045);
   border: 1px solid rgba(255, 255, 255, 0.1);
@@ -545,6 +580,10 @@
   }
 
   .rss-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .rss-detail-grid {
     grid-template-columns: 1fr;
   }
 

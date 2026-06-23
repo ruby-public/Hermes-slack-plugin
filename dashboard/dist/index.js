@@ -108,7 +108,7 @@
     return task && task.context && typeof task.context === "object" ? task.context : {};
   }
 
-  function taskMeta(task) {
+  function taskDetails(task) {
     if (!task) return [];
     return [
       ["Task", task.task_id],
@@ -121,6 +121,42 @@
       ["Created", task.created_at],
       ["Updated", task.updated_at],
     ].filter((item) => item[1] !== undefined && item[1] !== null && item[1] !== "");
+  }
+
+  function friendlyStatus(task) {
+    const status = task && task.status ? String(task.status) : "open";
+    if (status === "claimed") return "Claimed";
+    if (status === "completed") return "Completed";
+    return "Open";
+  }
+
+  function friendlyOperator(value) {
+    const text = safeValue(value).trim();
+    if (!text) return "";
+    return text.replace(/^operator:/, "");
+  }
+
+  function taskStatusLine(task) {
+    if (!task) return "";
+    const parts = [friendlyStatus(task)];
+    const operator = friendlyOperator(task.assigned_to);
+    if (operator) parts.push(`Owner ${operator}`);
+    if (task.updated_at) parts.push(`Updated ${formatDateTime(task.updated_at)}`);
+    return parts.join(" · ");
+  }
+
+  function reviewNotice(task) {
+    const flags = Array.isArray(task && task.risk_flags) ? task.risk_flags : [];
+    if (flags.includes("payment")) return "Payment-related issue. Verify backend state before replying.";
+    if (flags.includes("account")) return "Account-related issue. Check user state before replying.";
+    if (flags.includes("promotion")) return "Promotion-related issue. Confirm eligibility before replying.";
+    if (task && task.reason === "human_requested") return "Customer requested human support.";
+    return "";
+  }
+
+  function hasKnowledgeResult(task) {
+    const sources = Array.isArray(task && task.sources) ? task.sources : [];
+    return sources.length > 0;
   }
 
   function formatDateTime(value) {
@@ -293,6 +329,7 @@
   function KnowledgePanel({task, show, onToggle}) {
     const sources = Array.isArray(task && task.sources) ? task.sources : [];
     const resultText = safeValue(task && task.suggested_reply).trim();
+    if (!sources.length) return null;
     return h(
       "section",
       {className: "rss-tool-panel"},
@@ -302,8 +339,8 @@
         h(
           "div",
           null,
-          h("h3", null, "FAQ / search result"),
-          h("p", null, sources.length ? `${sources.length} source${sources.length === 1 ? "" : "s"} found` : `${task.reason || "handoff"} · not a reply draft`),
+          h("h3", null, "Knowledge match"),
+          h("p", null, `${sources.length} source${sources.length === 1 ? "" : "s"} found · not a reply draft`),
         ),
         h(Button, {onClick: onToggle}, show ? "Hide" : "View"),
       ),
@@ -329,6 +366,20 @@
               : null,
           )
         : null,
+    );
+  }
+
+  function DetailsPanel({task, show, onToggle}) {
+    return h(
+      "section",
+      {className: "rss-tool-panel"},
+      h(
+        "div",
+        {className: "rss-subsection-head"},
+        h("div", null, h("h3", null, "Details"), h("p", null, "Internal diagnostics")),
+        h(Button, {onClick: onToggle}, show ? "Hide" : "View"),
+      ),
+      show ? h("div", {className: "rss-detail-grid"}, taskDetails(task).map(([label, value]) => h("div", {className: "rss-detail-item", key: label}, h("span", null, label), h("strong", null, value)))) : null,
     );
   }
 
@@ -373,7 +424,7 @@
         task.assigned_to ? h("span", {className: "rss-row-assignee"}, task.assigned_to) : h("span", {className: "rss-row-assignee"}, "unassigned"),
       ),
       h("span", {className: "rss-row-main"}, task.user_message || task.task_id),
-      h("span", {className: "rss-row-sub"}, `${task.reason || "handoff"} · ${context.customer_account || task.conversation_id || ""} · ${task.created_at || ""}`),
+      h("span", {className: "rss-row-sub"}, `Conversation #${task.conversation_id || ""} · ${formatDateTime(task.updated_at || task.created_at)}`),
     );
   }
 
@@ -486,6 +537,7 @@
     const [error, setError] = useState("");
     const [showPrompt, setShowPrompt] = useState(false);
     const [showKnowledge, setShowKnowledge] = useState(false);
+    const [showDetails, setShowDetails] = useState(false);
     const [replyText, setReplyText] = useState("");
     const [replyBusy, setReplyBusy] = useState("");
     const [lastRefresh, setLastRefresh] = useState("");
@@ -523,6 +575,7 @@
       setTaskData(null);
       setShowPrompt(false);
       setShowKnowledge(false);
+      setShowDetails(false);
       setReplyText("");
       setRunLines([]);
       setSessionId("");
@@ -636,6 +689,7 @@
           setSelectedId(cleanId);
           setShowPrompt(false);
           setShowKnowledge(false);
+          setShowDetails(false);
           setReplyText("");
           updateUrlTaskId(cleanId);
           setNewTaskIds((current) => current.filter((taskId) => taskId !== cleanId));
@@ -1028,7 +1082,7 @@
                 h(
                   "div",
                   {className: "rss-section-head"},
-                  h("div", null, h("h2", null, `Conversation #${task.conversation_id || ""}`), h("p", null, loadingTask ? "Loading task..." : task.task_id)),
+                  h("div", null, h("h2", null, `Conversation #${task.conversation_id || ""}`), h("p", null, loadingTask ? "Loading task..." : taskStatusLine(task))),
                   h(
                     "div",
                     {className: "rss-actions"},
@@ -1042,10 +1096,7 @@
                     h(Button, {kind: "primary", onClick: claimAndStart}, task.status === "open" ? "Claim & start" : "Start Hermes"),
                   ),
                 ),
-                h("div", {className: "rss-meta"}, taskMeta(task).map(([label, value]) => h(Chip, {key: label}, `${label}: ${value}`))),
-                task.risk_flags && task.risk_flags.length
-                  ? h("div", {className: "rss-risk"}, task.risk_flags.map((flag) => h(Chip, {key: flag, tone: "risk"}, flag)))
-                  : null,
+                reviewNotice(task) ? h("div", {className: "rss-review-notice"}, reviewNotice(task)) : null,
                 h(
                   "section",
                   {className: "rss-conversation-block"},
@@ -1065,7 +1116,7 @@
                   onSendReply: () => sendHandoffReply("reply"),
                   onSendAndComplete: () => sendHandoffReply("complete"),
                 }),
-                h(KnowledgePanel, {task, show: showKnowledge, onToggle: () => setShowKnowledge((value) => !value)}),
+                hasKnowledgeResult(task) ? h(KnowledgePanel, {task, show: showKnowledge, onToggle: () => setShowKnowledge((value) => !value)}) : null,
                 h(
                   "section",
                   {className: "rss-tool-panel"},
@@ -1077,6 +1128,7 @@
                   ),
                   showPrompt ? h(Field, {label: "Prompt preview", value: prompt, multiline: true}) : null,
                 ),
+                h(DetailsPanel, {task, show: showDetails, onToggle: () => setShowDetails((value) => !value)}),
                 sessionId ? h("div", {className: "rss-session"}, "Session: ", h("code", null, sessionId)) : null,
                 runLines.length ? h("div", {className: "rss-log"}, runLines.map((line, index) => h("div", {key: `${line}-${index}`}, line))) : null,
               )

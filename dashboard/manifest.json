@@ -3,7 +3,7 @@
   "label": "Ruby Support",
   "description": "Local Hermes support workstation with active handoff queue polling.",
   "icon": "MessageSquare",
-  "version": "0.3.10",
+  "version": "0.3.11",
   "tab": {
     "path": "/ruby-slack-support",
     "position": "after:sessions"
