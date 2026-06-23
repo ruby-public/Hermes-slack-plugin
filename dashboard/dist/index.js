@@ -82,9 +82,10 @@
     };
   }
 
-  async function apiFetch(path, options) {
+  async function apiFetch(path, options = {}) {
     const url = `/api/plugins/${PLUGIN_NAME}${path}`;
-    if (SDK.fetchJSON) return SDK.fetchJSON(url, options);
+    const method = (options.method || "GET").toUpperCase();
+    if (method === "GET" && !options.body && SDK.fetchJSON) return SDK.fetchJSON(url);
 
     const fetcher = SDK.authedFetch || window.fetch.bind(window);
     const response = await fetcher(url, options);
