@@ -1,9 +1,9 @@
 {
   "name": "ruby-slack-support",
   "label": "Ruby Support",
-  "description": "Local Hermes support workstation with active handoff queue polling.",
+  "description": "Local Hermes support workstation with conversation views and handoff queue polling.",
   "icon": "MessageSquare",
-  "version": "0.3.12",
+  "version": "0.6.2",
   "tab": {
     "path": "/ruby-slack-support",
     "position": "after:sessions"

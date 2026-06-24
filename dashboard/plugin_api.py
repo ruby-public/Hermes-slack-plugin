@@ -15,11 +15,13 @@ from fastapi import APIRouter, HTTPException, Query
 router = APIRouter()
 
 PLUGIN_NAME = "ruby-slack-support"
-PLUGIN_VERSION = "0.3.12"
+PLUGIN_VERSION = "0.6.2"
 WORKER_REQUEST_ATTEMPTS = 3
 MAX_PROMPT_JSON_CHARS = 14000
 DEFAULT_SITE = "main"
 DEFAULT_LANGUAGE = "ko"
+MAX_SESSION_LINKS = 400
+SESSION_LINK_STATES = {"ready", "stale", "error"}
 ENVIRONMENTS: dict[str, dict[str, str]] = {
     "production": {
         "label": "Production",
@@ -64,22 +66,27 @@ def _profile_label(profile: dict[str, Any]) -> str:
 def _load_config() -> dict[str, Any]:
     path = _config_file()
     if not path.exists():
-        return {"profiles": [], "active_profile_id": ""}
+        return {"profiles": [], "active_profile_id": "", "session_links": []}
     try:
         with path.open("r", encoding="utf-8") as handle:
             data = json.load(handle)
     except (OSError, json.JSONDecodeError):
-        return {"profiles": [], "active_profile_id": ""}
+        return {"profiles": [], "active_profile_id": "", "session_links": []}
 
     if not isinstance(data, dict):
-        return {"profiles": [], "active_profile_id": ""}
+        return {"profiles": [], "active_profile_id": "", "session_links": []}
     profiles = data.get("profiles")
     if not isinstance(profiles, list):
         profiles = []
+    session_links = data.get("session_links")
+    if not isinstance(session_links, list):
+        session_links = []
     clean_profiles = [profile for profile in profiles if isinstance(profile, dict)]
+    clean_session_links = [link for link in session_links if isinstance(link, dict)]
     return {
         "profiles": clean_profiles,
         "active_profile_id": str(data.get("active_profile_id") or ""),
+        "session_links": clean_session_links,
     }
 
 
@@ -221,6 +228,153 @@ def _save_active_profile(profile_id: str) -> None:
     data = _load_config()
     data["active_profile_id"] = profile_id
     _save_config(data)
+
+
+def _normalize_session_link(link: dict[str, Any]) -> dict[str, Any] | None:
+    profile_id = str(link.get("profile_id") or "").strip()
+    task_id = str(link.get("task_id") or "").strip()
+    dashboard_session_id = str(link.get("dashboard_session_id") or link.get("session_id") or "").strip()
+    gateway_session_id = str(link.get("gateway_session_id") or link.get("session_id") or "").strip()
+    if not (profile_id and task_id and (dashboard_session_id or gateway_session_id)):
+        return None
+    state = str(link.get("state") or "ready").strip().lower()
+    if state not in SESSION_LINK_STATES:
+        state = "ready"
+    return {
+        "profile_id": profile_id,
+        "task_id": task_id,
+        "conversation_id": str(link.get("conversation_id") or "").strip(),
+        "session_id": dashboard_session_id or gateway_session_id,
+        "dashboard_session_id": dashboard_session_id,
+        "gateway_session_id": gateway_session_id,
+        "state": state,
+        "task_label": str(link.get("task_label") or "").strip(),
+        "last_task_signature": str(link.get("last_task_signature") or "").strip(),
+        "last_task_updated_at": str(link.get("last_task_updated_at") or "").strip(),
+        "last_opened_at": str(link.get("last_opened_at") or "").strip(),
+        "last_error": str(link.get("last_error") or "").strip(),
+        "created_at": str(link.get("created_at") or ""),
+        "updated_at": str(link.get("updated_at") or ""),
+    }
+
+
+def _all_session_links() -> list[dict[str, Any]]:
+    data = _load_config()
+    links = []
+    for link in data.get("session_links") or []:
+        normalized = _normalize_session_link(link)
+        if normalized:
+            links.append(normalized)
+    return links
+
+
+def _redact_session_link(link: dict[str, Any]) -> dict[str, Any]:
+    dashboard_session_id = str(link.get("dashboard_session_id") or link.get("session_id") or "").strip()
+    gateway_session_id = str(link.get("gateway_session_id") or link.get("session_id") or "").strip()
+    return {
+        "profile_id": link["profile_id"],
+        "task_id": link["task_id"],
+        "conversation_id": link.get("conversation_id") or "",
+        "session_id": dashboard_session_id or gateway_session_id,
+        "dashboard_session_id": dashboard_session_id,
+        "gateway_session_id": gateway_session_id,
+        "state": link.get("state") or "ready",
+        "task_label": link.get("task_label") or "",
+        "last_task_signature": link.get("last_task_signature") or "",
+        "last_task_updated_at": link.get("last_task_updated_at") or "",
+        "last_opened_at": link.get("last_opened_at") or "",
+        "last_error": link.get("last_error") or "",
+        "created_at": link.get("created_at") or "",
+        "updated_at": link.get("updated_at") or "",
+    }
+
+
+def _session_links_for_profile(profile_id: str) -> list[dict[str, Any]]:
+    return [
+        link for link in _all_session_links()
+        if link.get("profile_id") == profile_id
+    ]
+
+
+def _save_session_links(links: list[dict[str, Any]]) -> None:
+    data = _load_config()
+    ordered = sorted(
+        [_redact_session_link(link) for link in links],
+        key=lambda item: str(item.get("updated_at") or item.get("created_at") or ""),
+        reverse=True,
+    )[:MAX_SESSION_LINKS]
+    data["session_links"] = ordered
+    _save_config(data)
+
+
+def _upsert_session_link(profile_id: str, task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    clean_task_id = str(task_id or "").strip()
+    dashboard_session_id = str(payload.get("dashboard_session_id") or payload.get("session_id") or "").strip()
+    gateway_session_id = str(payload.get("gateway_session_id") or payload.get("session_id") or "").strip()
+    if not clean_task_id:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "ruby_support_session_link_invalid",
+                "message": "Task ID is required.",
+            },
+        )
+
+    state = str(payload.get("state") or "ready").strip().lower()
+    if state not in SESSION_LINK_STATES:
+        state = "ready"
+
+    now = str(_now_ms())
+    existing_links = _all_session_links()
+    existing = next(
+        (
+            link for link in existing_links
+            if link.get("profile_id") == profile_id and link.get("task_id") == clean_task_id
+        ),
+        None,
+    )
+    dashboard_session_id = dashboard_session_id or str((existing or {}).get("dashboard_session_id") or "").strip()
+    gateway_session_id = gateway_session_id or str((existing or {}).get("gateway_session_id") or "").strip()
+    if not (dashboard_session_id or gateway_session_id):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "ruby_support_session_link_invalid",
+                "message": "At least one Hermes session ID is required.",
+            },
+        )
+    next_link = {
+        "profile_id": profile_id,
+        "task_id": clean_task_id,
+        "conversation_id": str(payload.get("conversation_id") or (existing or {}).get("conversation_id") or "").strip(),
+        "session_id": dashboard_session_id or gateway_session_id,
+        "dashboard_session_id": dashboard_session_id,
+        "gateway_session_id": gateway_session_id,
+        "state": state,
+        "task_label": str(payload.get("task_label") or (existing or {}).get("task_label") or "").strip(),
+        "last_task_signature": str(payload.get("last_task_signature") or (existing or {}).get("last_task_signature") or "").strip(),
+        "last_task_updated_at": str(payload.get("last_task_updated_at") or (existing or {}).get("last_task_updated_at") or "").strip(),
+        "last_opened_at": str(payload.get("last_opened_at") or (existing or {}).get("last_opened_at") or "").strip(),
+        "last_error": str(payload.get("last_error") or "").strip(),
+        "created_at": str((existing or {}).get("created_at") or now),
+        "updated_at": now,
+    }
+    remaining = [
+        link for link in existing_links
+        if not (link.get("profile_id") == profile_id and link.get("task_id") == clean_task_id)
+    ]
+    remaining.append(next_link)
+    _save_session_links(remaining)
+    return next_link
+
+
+def _delete_session_link(profile_id: str, task_id: str) -> None:
+    clean_task_id = str(task_id or "").strip()
+    remaining = [
+        link for link in _all_session_links()
+        if not (link.get("profile_id") == profile_id and link.get("task_id") == clean_task_id)
+    ]
+    _save_session_links(remaining)
 
 
 def _worker_json(
@@ -443,6 +597,7 @@ def get_config() -> dict[str, Any]:
     profiles = _profiles_with_secrets()
     redacted = [_redact_profile(profile) for profile in profiles]
     active_profile_id = _active_profile_id(profiles)
+    session_links = _session_links_for_profile(active_profile_id) if active_profile_id else []
     return {
         "plugin": PLUGIN_NAME,
         "version": PLUGIN_VERSION,
@@ -458,6 +613,7 @@ def get_config() -> dict[str, Any]:
             "site": DEFAULT_SITE,
             "language": DEFAULT_LANGUAGE,
         },
+        "session_links": [_redact_session_link(link) for link in session_links],
         "missing": [] if profiles else ["support_profile"],
     }
 
@@ -537,6 +693,10 @@ def delete_profile(profile_id: str) -> dict[str, Any]:
             },
         )
     data["profiles"] = next_profiles
+    data["session_links"] = [
+        link for link in data.get("session_links") or []
+        if str(link.get("profile_id") or "") != profile_id
+    ]
     if data.get("active_profile_id") == profile_id:
         data["active_profile_id"] = str(next_profiles[0].get("id") if next_profiles else "")
     _save_config(data)
@@ -594,6 +754,41 @@ def list_handoffs(
     }
 
 
+@router.get("/session-links")
+def list_session_links(profile_id: str | None = Query(default=None)) -> dict[str, Any]:
+    profile = _select_profile(profile_id)
+    links = [_redact_session_link(link) for link in _session_links_for_profile(profile["id"])]
+    return {
+        "profile": _redact_profile(profile),
+        "links": links,
+    }
+
+
+@router.put("/session-links/{task_id}")
+def save_session_link(
+    task_id: str,
+    payload: dict[str, Any] | None = None,
+    profile_id: str | None = Query(default=None),
+) -> dict[str, Any]:
+    profile = _select_profile(profile_id)
+    link = _upsert_session_link(profile["id"], task_id, payload or {})
+    return {
+        "profile": _redact_profile(profile),
+        "link": _redact_session_link(link),
+        "links": [_redact_session_link(item) for item in _session_links_for_profile(profile["id"])],
+    }
+
+
+@router.delete("/session-links/{task_id}")
+def delete_session_link(task_id: str, profile_id: str | None = Query(default=None)) -> dict[str, Any]:
+    profile = _select_profile(profile_id)
+    _delete_session_link(profile["id"], task_id)
+    return {
+        "profile": _redact_profile(profile),
+        "links": [_redact_session_link(item) for item in _session_links_for_profile(profile["id"])],
+    }
+
+
 @router.get("/handoffs/{task_id}")
 def get_handoff(task_id: str, profile_id: str | None = Query(default=None)) -> dict[str, Any]:
     profile = _select_profile(profile_id)
@@ -631,6 +826,11 @@ def complete_handoff(task_id: str, payload: dict[str, Any] | None = None, profil
     return _handoff_action(task_id, "complete", profile_id, payload or {})
 
 
+@router.post("/handoffs/{task_id}/resume")
+def resume_handoff(task_id: str, profile_id: str | None = Query(default=None)) -> dict[str, Any]:
+    return _handoff_action(task_id, "resume", profile_id, {})
+
+
 @router.post("/handoffs/{task_id}/reply")
 def reply_handoff(task_id: str, payload: dict[str, Any] | None = None, profile_id: str | None = Query(default=None)) -> dict[str, Any]:
     return _handoff_action(task_id, "reply", profile_id, payload or {})
@@ -640,7 +840,19 @@ def _handoff_action(task_id: str, action: str, profile_id: str | None = None, pa
     profile = _select_profile(profile_id)
     safe_task_id = quote(task_id, safe="")
     response = _worker_json(profile, "POST", f"/v1/support/handoffs/{safe_task_id}/{action}", payload=payload or {})
-    task = response.get("task")
+    response_task = response.get("task") if isinstance(response, dict) else None
+    response_task_id = str(response_task.get("task_id") or "").strip() if isinstance(response_task, dict) else ""
+    detail_task_id = quote(response_task_id or task_id, safe="")
+    detail_response: dict[str, Any] | None = None
+    try:
+        detail_candidate = _worker_json(profile, "GET", f"/v1/support/handoffs/{detail_task_id}")
+        detail_response = detail_candidate if isinstance(detail_candidate, dict) else None
+    except HTTPException:
+        detail_response = None
+    task = detail_response.get("task") if isinstance(detail_response, dict) else None
+    if not isinstance(task, dict):
+        task = response.get("task")
+    detail_request_id = detail_response.get("request_id") if isinstance(detail_response, dict) else None
     if not isinstance(task, dict):
         raise HTTPException(
             status_code=502,
@@ -650,7 +862,7 @@ def _handoff_action(task_id: str, action: str, profile_id: str | None = None, pa
             },
         )
     return {
-        "request_id": response.get("request_id"),
+        "request_id": response.get("request_id") or detail_request_id,
         "task": task,
         "prompt": _build_prompt(task),
         "profile": _redact_profile(profile),

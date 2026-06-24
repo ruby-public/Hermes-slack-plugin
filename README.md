@@ -13,9 +13,14 @@ Slack is not required for day-to-day support work.
 ## What It Does
 
 - Adds a `Ruby Support` workstation tab to Hermes Dashboard.
-- Polls the active handoff queue and highlights new tasks.
+- Polls the latest support conversations and filters them by `Pending`,
+  `Completed`, or `All`.
+- Highlights new pending handoffs even when the operator is browsing completed
+  history.
 - Supports claim, release, and complete actions so multiple operators do not
   duplicate work.
+- Lets operators resume a completed conversation into a fresh claimed handoff
+  when follow-up work is needed.
 - Reads `task_id` from URLs such as
   `http://127.0.0.1:9119/ruby-slack-support?task_id=...`.
 - Stores one or more local support profiles. Each profile only needs
@@ -101,6 +106,19 @@ HERMES_WORKSTATION_BASE_URL=http://127.0.0.1:9119/ruby-slack-support?task_id={ta
 Each support operator uses the same Slack app and the same Slack alert, but the
 button opens that operator's own local Hermes Dashboard. Operators can also skip
 Slack entirely and work from the plugin queue.
+
+## Operator Flow
+
+The default `Pending` view is the day-to-day workspace:
+
+- Review the full conversation history in Dashboard.
+- Start or reopen Hermes when local investigation is needed.
+- Reply directly to Chatwoot from the same screen.
+- Complete the conversation when it is done.
+
+The `Completed` view is read-only by default. Use `Resume` to create a fresh
+working handoff for the same Chatwoot conversation before sending another reply
+or starting Hermes again.
 
 ## Development
 

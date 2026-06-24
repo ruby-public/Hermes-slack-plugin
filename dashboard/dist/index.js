@@ -1,9 +1,15 @@
 (function () {
   const PLUGIN_NAME = "ruby-slack-support";
   const PROFILE_STORAGE_KEY = "ruby-slack-support.activeProfileId";
+  const REPLY_DRAFT_STORAGE_PREFIX = "ruby-slack-support.replyDraft";
   const FALLBACK_ENVIRONMENTS = [
     {id: "production", label: "Production"},
     {id: "staging", label: "Staging"},
+  ];
+  const QUEUE_VIEWS = [
+    {id: "active", label: "Pending"},
+    {id: "completed", label: "Completed"},
+    {id: "all", label: "All"},
   ];
   const SDK = window.__HERMES_PLUGIN_SDK__ || {};
   const React = SDK.React || window.React;
@@ -53,10 +59,66 @@
     }
   }
 
+  function replyDraftStorageKey(profileId, taskId) {
+    if (!profileId || !taskId) return "";
+    return `${REPLY_DRAFT_STORAGE_PREFIX}.${profileId}.${taskId}`;
+  }
+
+  function loadReplyDraft(profileId, taskId) {
+    const key = replyDraftStorageKey(profileId, taskId);
+    if (!key) return "";
+    try {
+      return window.localStorage.getItem(key) || "";
+    } catch (_error) {
+      return "";
+    }
+  }
+
+  function persistReplyDraft(profileId, taskId, value) {
+    const key = replyDraftStorageKey(profileId, taskId);
+    if (!key) return;
+    try {
+      if (value && value.trim()) window.localStorage.setItem(key, value);
+      else window.localStorage.removeItem(key);
+    } catch (_error) {
+      // Ignore storage issues in embedded contexts.
+    }
+  }
+
   function withProfile(path, profileId) {
     if (!profileId) return path;
     const separator = path.includes("?") ? "&" : "?";
     return `${path}${separator}profile_id=${encodeURIComponent(profileId)}`;
+  }
+
+  function queueViewLabel(view) {
+    return (QUEUE_VIEWS.find((item) => item.id === view) || QUEUE_VIEWS[0]).label;
+  }
+
+  function queueViewMatchesTask(view, task) {
+    if (!task) return false;
+    if (view === "completed") return task.status === "completed";
+    if (view === "all") return true;
+    return task.status === "open" || task.status === "claimed";
+  }
+
+  function taskIdOf(task) {
+    return safeValue(task && task.task_id).trim();
+  }
+
+  function compareRecentTasks(a, b) {
+    const left = safeValue(b && (b.updated_at || b.completed_at || b.created_at));
+    const right = safeValue(a && (a.updated_at || a.completed_at || a.created_at));
+    return left.localeCompare(right);
+  }
+
+  function syncTaskStateSnapshot(tasks, taskStateRef) {
+    const nextStates = new Map();
+    (Array.isArray(tasks) ? tasks : []).forEach((item) => {
+      if (!item || !item.task_id) return;
+      nextStates.set(item.task_id, {signature: taskActivitySignature(item)});
+    });
+    taskStateRef.current = nextStates;
   }
 
   function environmentOptions(config) {
@@ -95,13 +157,57 @@
     const fetcher = SDK.authedFetch || window.fetch.bind(window);
     const response = await fetcher(url, options);
     const text = await response.text();
-    const body = text ? JSON.parse(text) : null;
+    let body = null;
+    if (text) {
+      try {
+        body = JSON.parse(text);
+      } catch (_error) {
+        body = text;
+      }
+    }
     if (!response.ok) {
       const error = new Error(formatDetail(body));
       error.detail = body && body.detail ? body.detail : body;
       throw error;
     }
     return body;
+  }
+
+  async function dashboardFetch(path, options = {}) {
+    const method = (options.method || "GET").toUpperCase();
+    const fetcher = SDK.authedFetch || window.fetch.bind(window);
+    const headers = new Headers(options.headers || {});
+    const token = window.__HERMES_SESSION_TOKEN__;
+    if (token && !headers.has("X-Hermes-Session-Token")) headers.set("X-Hermes-Session-Token", token);
+
+    const response = await fetcher(path, {
+      ...options,
+      method,
+      headers,
+      credentials: options.credentials || "include",
+    });
+    const text = await response.text();
+    let body = null;
+    if (text) {
+      try {
+        body = JSON.parse(text);
+      } catch (_error) {
+        body = text;
+      }
+    }
+    if (!response.ok) {
+      const error = new Error(formatDetail(body));
+      error.status = response.status;
+      error.detail = body && body.detail ? body.detail : body;
+      throw error;
+    }
+    return body;
+  }
+
+  async function listDashboardSessions(limit = 10) {
+    const response = await dashboardFetch(`/api/sessions?limit=${limit}&offset=0`);
+    if (Array.isArray(response)) return response;
+    return Array.isArray(response && response.sessions) ? response.sessions : [];
   }
 
   function taskContext(task) {
@@ -120,6 +226,8 @@
       ["Knowledge", task.knowledge_state],
       ["Created", task.created_at],
       ["Updated", task.updated_at],
+      ["Completed", task.completed_at],
+      ["Completed by", task.completed_by],
     ].filter((item) => item[1] !== undefined && item[1] !== null && item[1] !== "");
   }
 
@@ -150,7 +258,7 @@
     if (flags.includes("payment")) return "Payment-related issue. Verify backend state before replying.";
     if (flags.includes("account")) return "Account-related issue. Check user state before replying.";
     if (flags.includes("promotion")) return "Promotion-related issue. Confirm eligibility before replying.";
-    if (task && task.reason === "human_requested") return "Customer requested human support.";
+    if (task && task.reason === "customer_requested_handoff") return "Customer requested human support.";
     return "";
   }
 
@@ -161,9 +269,70 @@
 
   function formatDateTime(value) {
     if (!value) return "";
-    const date = new Date(value);
+    const numericValue = typeof value === "string" && /^\d+$/.test(value) ? Number(value) : value;
+    const date = new Date(numericValue);
     if (Number.isNaN(date.getTime())) return String(value);
     return date.toLocaleString([], {month: "short", day: "numeric", hour: "2-digit", minute: "2-digit"});
+  }
+
+  function buildChatResumeUrl(sessionId) {
+    return `/chat?resume=${encodeURIComponent(sessionId)}`;
+  }
+
+  function taskDisplayLabel(task) {
+    if (!task) return "Selected handoff";
+    return task.conversation_id ? `Conversation #${task.conversation_id}` : task.task_id || "Selected handoff";
+  }
+
+  function taskShortTitle(task) {
+    if (!task) return "";
+    return safeValue(task.user_message).trim() || taskDisplayLabel(task);
+  }
+
+  function buildHermesUpdatePrompt(handoffPrompt) {
+    return [
+      "Conversation update received after the current Hermes session was already started.",
+      "Treat the latest context below as the source of truth and continue the same support investigation.",
+      "",
+      handoffPrompt,
+    ].join("\n");
+  }
+
+  function sessionLinkMapFromList(links) {
+    const map = new Map();
+    (Array.isArray(links) ? links : []).forEach((link) => {
+      if (!link || !link.task_id) return;
+      map.set(link.task_id, link);
+    });
+    return map;
+  }
+
+  function taskNeedsHermesSync(task, link) {
+    if (!task || !link || !(link.gateway_session_id || link.session_id)) return false;
+    return taskActivitySignature(task) !== safeValue(link.last_task_signature).trim();
+  }
+
+  function sessionGatewayId(link) {
+    return safeValue(link && (link.gateway_session_id || link.session_id)).trim();
+  }
+
+  function sessionResumeId(link) {
+    return safeValue(link && (link.dashboard_session_id || link.session_id || link.gateway_session_id)).trim();
+  }
+
+  function hermesSessionTone(link, pendingSync) {
+    if (!link || !(link.gateway_session_id || link.session_id || link.dashboard_session_id)) return "neutral";
+    if (pendingSync) return "risk";
+    if (link.state === "stale" || link.state === "error") return "risk";
+    return "claimed";
+  }
+
+  function hermesSessionLabel(link, pendingSync) {
+    if (!link || !(link.gateway_session_id || link.session_id || link.dashboard_session_id)) return "Not started";
+    if (pendingSync) return "Needs update";
+    if (link.state === "stale") return "Session missing";
+    if (link.state === "error") return "Needs restart";
+    return "Ready";
   }
 
   function conversationMessages(taskData, task) {
@@ -186,6 +355,46 @@
     ];
   }
 
+  function hasWorkerConversation(taskData) {
+    return Boolean(
+      taskData &&
+      taskData.task &&
+      taskData.task.conversation &&
+      Array.isArray(taskData.task.conversation.messages) &&
+      taskData.task.conversation.messages.length,
+    );
+  }
+
+  function taskActivitySignature(task) {
+    if (!task) return "";
+    const messageId = safeValue(task.message_id).trim();
+    if (messageId) return `message:${messageId}`;
+    const userMessage = safeValue(task.user_message).trim();
+    if (userMessage) return `message:${userMessage}`;
+    return `updated:${safeValue(task.updated_at || task.created_at).trim()}`;
+  }
+
+  function taskSummaryChanged(summary, currentTask) {
+    if (!summary || !currentTask) return false;
+    return (
+      safeValue(summary.status) !== safeValue(currentTask.status) ||
+      safeValue(summary.assigned_to) !== safeValue(currentTask.assigned_to) ||
+      safeValue(summary.message_id) !== safeValue(currentTask.message_id) ||
+      safeValue(summary.updated_at) !== safeValue(currentTask.updated_at)
+    );
+  }
+
+  function taskStillActive(task) {
+    return Boolean(task && (task.status === "open" || task.status === "claimed"));
+  }
+
+  function isSupportReplyMessage(message) {
+    if (!message) return false;
+    const origin = safeValue(message.aihub_origin).trim().toLowerCase();
+    if (origin === "aihub:hermes_workstation") return true;
+    return false;
+  }
+
   function messageTone(message) {
     if (message && message.private) return "private";
     const type = String((message && (message.message_type || message.sender_type)) || "").toLowerCase();
@@ -194,11 +403,15 @@
     return "neutral";
   }
 
-  function messageLabel(message) {
+  function messageLabel(message, task) {
     if (!message) return "Message";
     if (message.private) return "Private note";
-    if (message.sender_name) return message.sender_name;
+    const origin = safeValue(message.aihub_origin).trim().toLowerCase();
     const tone = messageTone(message);
+    const senderName = safeValue(message.sender_name).trim();
+    if (isSupportReplyMessage(message, task)) return "Support reply";
+    if (origin === "aihub:auto_reply") return "FAQ auto-reply";
+    if (message.sender_name) return message.sender_name;
     if (tone === "incoming") return "Customer";
     if (tone === "outgoing") return "Support";
     return message.message_type || message.sender_type || "Message";
@@ -306,7 +519,7 @@
     );
   }
 
-  function ConversationThread({messages}) {
+  function ConversationThread({messages, task}) {
     if (!messages.length) {
       return h("div", {className: "rss-empty"}, "No conversation history available yet.");
     }
@@ -320,13 +533,13 @@
           "div",
           {key, className: `rss-message rss-message-${tone}`},
           h(
-            "div",
-            {className: "rss-message-meta"},
-            h("span", null, messageLabel(message)),
-            h("span", null, formatDateTime(message.created_at || message.received_at)),
-          ),
-          h("div", {className: "rss-message-body"}, message.content || "(empty)"),
-        );
+          "div",
+          {className: "rss-message-meta"},
+          h("span", null, messageLabel(message, task)),
+          h("span", null, formatDateTime(message.created_at || message.received_at)),
+        ),
+        h("div", {className: "rss-message-body"}, message.content || "(empty)"),
+      );
       }),
     );
   }
@@ -413,9 +626,33 @@
     );
   }
 
-  function QueueRow({task, selected, isNew, onSelect}) {
-    const context = taskContext(task);
-    const tone = task.status === "open" ? "open" : task.status === "claimed" ? "claimed" : "neutral";
+  function CompletedPanel({task}) {
+    const completedBy = friendlyOperator(task && (task.completed_by || task.assigned_to));
+    const summary = completedBy
+      ? `Completed by ${completedBy}${task && task.completed_at ? ` · ${formatDateTime(task.completed_at)}` : ""}`
+      : task && task.completed_at
+        ? `Completed ${formatDateTime(task.completed_at)}`
+        : "This conversation is currently closed.";
+    return h(
+      "section",
+      {className: "rss-completed-panel"},
+      h(
+        "div",
+        {className: "rss-subsection-head"},
+        h("div", null, h("h3", null, "Completed"), h("p", null, summary)),
+      ),
+      h("div", {className: "rss-session-title"}, "Resume creates a fresh working handoff so you can investigate again, reopen Hermes, or send another reply."),
+    );
+  }
+
+  function QueueRow({task, selected, isNew, sessionLink, pendingSync, launchBusy, onSelect}) {
+    const tone = task.status === "open" ? "open" : task.status === "claimed" ? "claimed" : task.status === "completed" ? "done" : "neutral";
+    const assignee = task.status === "completed"
+      ? friendlyOperator(task.completed_by || task.assigned_to) || "completed"
+      : friendlyOperator(task.assigned_to) || "unassigned";
+    const hermesLabel = launchBusy ? "Starting Hermes" : hermesSessionLabel(sessionLink, pendingSync);
+    const conversationLabel = task.conversation_id ? `Conversation #${task.conversation_id}` : task.task_id;
+    const timestamp = task.status === "completed" ? task.completed_at || task.updated_at || task.created_at : task.updated_at || task.created_at;
     return h(
       "button",
       {
@@ -426,10 +663,17 @@
         "span",
         {className: "rss-row-top"},
         h(Chip, {tone}, task.status || "open"),
-        task.assigned_to ? h("span", {className: "rss-row-assignee"}, task.assigned_to) : h("span", {className: "rss-row-assignee"}, "unassigned"),
+        h("span", {className: "rss-row-assignee"}, assignee),
       ),
       h("span", {className: "rss-row-main"}, task.user_message || task.task_id),
-      h("span", {className: "rss-row-sub"}, `Conversation #${task.conversation_id || ""} · ${formatDateTime(task.updated_at || task.created_at)}`),
+      h("span", {className: "rss-row-sub"}, `${conversationLabel} · ${formatDateTime(timestamp)}`),
+      sessionLink || launchBusy
+        ? h(
+            "span",
+            {className: "rss-row-tags"},
+            h(Chip, {tone: launchBusy ? "claimed" : hermesSessionTone(sessionLink, pendingSync)}, hermesLabel),
+          )
+        : null,
     );
   }
 
@@ -522,6 +766,217 @@
     );
   }
 
+  function ConfirmModal({state, onCancel, onConfirm}) {
+    if (!state || !state.open) return null;
+    return h(
+      "div",
+      {
+        className: "rss-modal-backdrop",
+        onMouseDown: (event) => {
+          if (event.target === event.currentTarget) onCancel();
+        },
+      },
+      h(
+        "div",
+        {className: "rss-modal rss-confirm-modal", role: "dialog", "aria-modal": "true", "aria-label": state.title || "Confirm action"},
+        h(
+          "div",
+          {className: "rss-section-head"},
+          h(
+            "div",
+            {className: "rss-confirm-copy"},
+            h("h2", null, state.title || "Confirm action"),
+            h("p", {className: "rss-confirm-message"}, state.message || "Please confirm this action."),
+          ),
+          h(
+            "div",
+            {className: "rss-actions"},
+            h(Button, {onClick: onCancel}, state.cancelLabel || "Cancel"),
+            h(Button, {kind: "primary", onClick: onConfirm}, state.confirmLabel || "Confirm"),
+          ),
+        ),
+      ),
+    );
+  }
+
+  function HermesLaunchModal({launchState, task, runLines, onClose, onOpenSession}) {
+    if (!launchState || !launchState.open) return null;
+    const titleMap = {
+      start: "Start Hermes",
+      update: "Send update",
+      restart: "Restart Hermes",
+    };
+    const title = titleMap[launchState.mode] || "Hermes session";
+    const isReady = launchState.phase === "ready";
+    const isError = launchState.phase === "error";
+    const bannerTone = isReady ? "ok" : isError ? "warn" : "neutral";
+    const bannerLabel = isReady ? "Session ready" : isError ? "Needs attention" : "Connecting";
+    const bannerDetail = isReady
+      ? launchState.sessionId
+      : isError
+        ? "Check the launch log below"
+        : "Creating or updating the local Hermes session";
+
+    return h(
+      "div",
+      {
+        className: "rss-modal-backdrop",
+        onMouseDown: (event) => {
+          if (event.target === event.currentTarget) onClose();
+        },
+      },
+      h(
+        "div",
+        {className: "rss-modal rss-launch-modal", role: "dialog", "aria-modal": "true", "aria-label": title},
+        h(
+          "div",
+          {className: "rss-section-head"},
+          h(
+            "div",
+            null,
+            h("h2", null, title),
+            h("p", null, taskDisplayLabel(task)),
+          ),
+          h(
+            "div",
+            {className: "rss-actions"},
+            isReady && launchState.sessionId
+              ? h(Button, {kind: "primary", onClick: onOpenSession}, "Open Hermes")
+              : null,
+            h(Button, {onClick: onClose}, "Close"),
+          ),
+        ),
+        h(
+          "div",
+          {className: `rss-banner rss-banner-${bannerTone}`},
+          h("span", null, bannerLabel),
+          h("span", {className: "rss-banner-detail"}, bannerDetail),
+        ),
+        h(
+          "div",
+          {className: "rss-launch-copy"},
+          h("strong", null, taskShortTitle(task) || "Selected handoff"),
+          h("p", null, "You can close this panel at any time. The local Hermes session will keep running."),
+        ),
+        launchState.error ? h("div", {className: "rss-error"}, launchState.error) : null,
+        h("div", {className: "rss-log rss-log-launch"}, runLines.length ? runLines.map((line, index) => h("div", {key: `${line}-${index}`}, line)) : "Waiting for launch updates..."),
+      ),
+    );
+  }
+
+  function HermesSessionPanel({
+    task,
+    sessionLink,
+    pendingSync,
+    launchBusy,
+    onPrimaryAction,
+    onOpenSession,
+    onResume,
+  }) {
+    const completed = task && task.status === "completed";
+    const resumeId = sessionResumeId(sessionLink);
+    const sessionReady = Boolean(resumeId && sessionLink && sessionLink.state === "ready");
+    const sessionUnavailable = Boolean(resumeId && sessionLink && (sessionLink.state === "stale" || sessionLink.state === "error"));
+    const title = launchBusy
+      ? "Launching local Hermes session"
+      : completed
+        ? "Conversation is completed"
+      : !sessionLink
+        ? "Hermes session not started"
+        : pendingSync
+          ? "New conversation activity is ready to sync"
+          : sessionUnavailable
+            ? "Previous Hermes session is unavailable"
+            : "Hermes session is ready";
+    const description = launchBusy
+      ? "A local session is being prepared for this handoff."
+      : completed
+        ? "Resume this conversation when you want to investigate again or prepare another reply."
+      : !sessionLink
+        ? "Start a local Hermes session when you want to investigate. Open handoffs are claimed automatically."
+        : pendingSync
+          ? "Send the refreshed conversation context into the existing Hermes session before continuing."
+          : sessionUnavailable
+            ? "The saved session can no longer be reopened. Start a fresh session to continue the investigation."
+            : "Reopen the current Hermes investigation at any time from this workstation.";
+    const primaryLabel = launchBusy
+      ? "Working..."
+      : completed
+        ? "Resume"
+      : !sessionLink
+        ? "Start Hermes"
+        : pendingSync
+          ? "Send update"
+          : sessionUnavailable
+            ? "Restart Hermes"
+            : "Open Hermes";
+    const metaItems = [];
+    if (resumeId) metaItems.push(["Session", resumeId]);
+    if (task && task.completed_at) metaItems.push(["Completed", formatDateTime(task.completed_at)]);
+    if (sessionLink && sessionLink.updated_at) metaItems.push([pendingSync ? "Last sync" : "Synced", formatDateTime(sessionLink.updated_at)]);
+    if (sessionLink && sessionLink.last_opened_at) metaItems.push(["Opened", formatDateTime(sessionLink.last_opened_at)]);
+
+    return h(
+      "section",
+      {className: "rss-session-panel"},
+      h(
+        "div",
+        {className: "rss-subsection-head"},
+        h(
+          "div",
+          null,
+          h("h3", null, "Hermes workspace"),
+          h("p", null, description),
+        ),
+        h(
+          "div",
+          {className: "rss-actions"},
+          h(Button, {kind: "primary", disabled: launchBusy, onClick: completed ? onResume : onPrimaryAction}, primaryLabel),
+          !completed && sessionReady && pendingSync
+            ? h(Button, {disabled: launchBusy, onClick: onOpenSession}, "Open Hermes")
+            : null,
+        ),
+      ),
+      h(
+        "div",
+        {className: "rss-session-summary"},
+        h(
+          Chip,
+          {tone: completed ? "done" : launchBusy ? "claimed" : hermesSessionTone(sessionLink, pendingSync)},
+          completed ? "Completed" : launchBusy ? "Starting" : hermesSessionLabel(sessionLink, pendingSync),
+        ),
+        task && task.status === "open" && !sessionLink && !launchBusy ? h(Chip, {tone: "open"}, "Will claim automatically") : null,
+      ),
+      h("div", {className: "rss-session-title"}, title),
+      metaItems.length
+        ? h(
+            "div",
+            {className: "rss-session-meta"},
+            metaItems.map(([label, value]) =>
+              h(
+                "div",
+                {className: "rss-session-meta-item", key: label},
+                h("span", null, label),
+                label === "Session" ? h("code", null, value) : h("strong", null, value),
+              ),
+            ),
+          )
+        : null,
+      sessionLink && sessionLink.last_error
+        ? h("div", {className: "rss-error"}, sessionLink.last_error)
+        : null,
+    );
+  }
+
+  function LoadingConversationPanel({task}) {
+    return h(
+      "div",
+      {className: "rss-empty rss-empty-large rss-loading-panel"},
+      h("h2", null, taskDisplayLabel(task)),
+      h("p", {className: "rss-loading-note"}, "Loading the latest conversation context..."),
+    );
+  }
+
   function App() {
     const [config, setConfig] = useState(null);
     const [profiles, setProfiles] = useState([]);
@@ -531,7 +986,9 @@
     const [profileSaving, setProfileSaving] = useState(false);
     const [profileTesting, setProfileTesting] = useState(false);
     const [profileTestResult, setProfileTestResult] = useState("");
+    const [sessionLinks, setSessionLinks] = useState([]);
     const [queue, setQueue] = useState([]);
+    const [queueView, setQueueView] = useState("active");
     const [selectedId, setSelectedId] = useState(getQueryTaskId);
     const [taskData, setTaskData] = useState(null);
     const [pollEnabled, setPollEnabled] = useState(true);
@@ -547,25 +1004,84 @@
     const [replyBusy, setReplyBusy] = useState("");
     const [lastRefresh, setLastRefresh] = useState("");
     const [newTaskIds, setNewTaskIds] = useState([]);
-    const [sessionId, setSessionId] = useState("");
+    const [activityNotice, setActivityNotice] = useState("");
+    const [launchState, setLaunchState] = useState({open: false, phase: "idle", mode: "start", taskId: "", sessionId: "", error: ""});
+    const [confirmState, setConfirmState] = useState(null);
     const [runLines, setRunLines] = useState([]);
-    const seenIdsRef = useRef(new Set());
+    const seenTaskStateRef = useRef(new Map());
+    const activityTimerRef = useRef(0);
     const wsRef = useRef(null);
+    const linksRequestRef = useRef(0);
+    const queueRequestRef = useRef(0);
+    const taskRequestRef = useRef(0);
+    const activeProfileRef = useRef("");
+    const selectedIdRef = useRef(selectedId);
+    const confirmResolverRef = useRef(null);
 
     const selectedProfile = useMemo(
       () => profiles.find((profile) => profile.id === activeProfileId) || null,
       [activeProfileId, profiles],
     );
-    const task = taskData && taskData.task ? taskData.task : null;
-    const prompt = taskData && taskData.prompt ? taskData.prompt : "";
-    const messages = conversationMessages(taskData, task);
-    const context = taskContext(task);
+    const taskRecord = taskData && taskData.task ? taskData.task : null;
+    const task = taskRecord && (!selectedId || taskIdOf(taskRecord) === selectedId) ? taskRecord : null;
+    const selectedSummary = useMemo(
+      () => queue.find((item) => item.task_id === selectedId) || null,
+      [queue, selectedId],
+    );
+    const prompt = task && taskData && taskData.prompt ? taskData.prompt : "";
+    const messages = conversationMessages(task ? taskData : null, task);
+    const workerConversationLoaded = hasWorkerConversation(task ? taskData : null);
+    const context = taskContext(task || selectedSummary);
+    const sessionLinkMap = useMemo(() => sessionLinkMapFromList(sessionLinks), [sessionLinks]);
+    const selectedSessionLink = useMemo(
+      () => (task && task.task_id ? sessionLinkMap.get(task.task_id) || null : null),
+      [sessionLinkMap, task],
+    );
+    const filteredQueue = useMemo(
+      () => queue.filter((item) => queueViewMatchesTask(queueView, item)),
+      [queue, queueView],
+    );
+    const sessionHasPendingSync = useMemo(
+      () => taskNeedsHermesSync(task, selectedSessionLink),
+      [selectedSessionLink, task],
+    );
+    const sessionLaunchBusy = Boolean(
+      launchState.phase === "running" && task && launchState.taskId === task.task_id,
+    );
     const openCount = queue.filter((item) => item.status === "open").length;
     const claimedCount = queue.filter((item) => item.status === "claimed").length;
+    const completedCount = queue.filter((item) => item.status === "completed").length;
     const pollMs = 15000;
+    const queueLimit = 100;
+    const detailLoading = Boolean(selectedId && (loadingTask || (taskRecord && taskIdOf(taskRecord) !== selectedId)));
 
     const appendRunLine = useCallback((line) => {
       setRunLines((current) => [line, ...current].slice(0, 12));
+    }, []);
+
+    const closeLaunchModal = useCallback(() => {
+      setLaunchState((current) => ({...current, open: false}));
+    }, []);
+
+    const resolveConfirmation = useCallback((confirmed) => {
+      const resolver = confirmResolverRef.current;
+      confirmResolverRef.current = null;
+      setConfirmState(null);
+      if (resolver) resolver(Boolean(confirmed));
+    }, []);
+
+    const requestConfirmation = useCallback((nextState) => {
+      if (confirmResolverRef.current) confirmResolverRef.current(false);
+      return new Promise((resolve) => {
+        confirmResolverRef.current = resolve;
+        setConfirmState({
+          open: true,
+          title: nextState && nextState.title ? nextState.title : "Confirm action",
+          message: nextState && nextState.message ? nextState.message : "Please confirm this action.",
+          confirmLabel: nextState && nextState.confirmLabel ? nextState.confirmLabel : "Confirm",
+          cancelLabel: nextState && nextState.cancelLabel ? nextState.cancelLabel : "Cancel",
+        });
+      });
     }, []);
 
     const updateUrlTaskId = useCallback((id) => {
@@ -576,29 +1092,46 @@
     }, []);
 
     const resetSelection = useCallback(() => {
+      selectedIdRef.current = "";
       setSelectedId("");
       setTaskData(null);
       setShowPrompt(false);
       setShowKnowledge(false);
       setShowDetails(false);
       setReplyText("");
+      setActivityNotice("");
       setRunLines([]);
-      setSessionId("");
       updateUrlTaskId("");
     }, [updateUrlTaskId]);
 
-    const notifyNewTasks = useCallback(
-      (items) => {
-        if (!items.length) return;
-        const ids = items.map((item) => item.task_id).filter(Boolean);
-        setNewTaskIds(ids);
-        window.setTimeout(() => {
+    const notifyTaskActivity = useCallback(
+      (newItems, updatedItems) => {
+        const orderedItems = [...newItems, ...updatedItems];
+        if (!orderedItems.length) return;
+
+        const ids = Array.from(new Set(orderedItems.map((item) => item.task_id).filter(Boolean)));
+        setNewTaskIds((current) => Array.from(new Set([...current, ...ids])));
+        const noticeParts = [];
+        if (newItems.length) noticeParts.push(`${newItems.length} new handoff${newItems.length === 1 ? "" : "s"}`);
+        if (updatedItems.length) noticeParts.push(`${updatedItems.length} updated conversation${updatedItems.length === 1 ? "" : "s"}`);
+        setActivityNotice(noticeParts.join(" · "));
+
+        if (activityTimerRef.current) window.clearTimeout(activityTimerRef.current);
+        activityTimerRef.current = window.setTimeout(() => {
           setNewTaskIds((current) => current.filter((id) => !ids.includes(id)));
+          setActivityNotice("");
+          activityTimerRef.current = 0;
         }, 45000);
 
         if (alertsEnabled && "Notification" in window && Notification.permission === "granted") {
-          const first = items[0];
-          new Notification(`${items.length} new support handoff${items.length > 1 ? "s" : ""}`, {
+          const first = newItems[0] || updatedItems[0];
+          const title =
+            newItems.length && updatedItems.length
+              ? `${newItems.length} new handoff${newItems.length === 1 ? "" : "s"} · ${updatedItems.length} updated`
+              : newItems.length
+                ? `${newItems.length} new support handoff${newItems.length === 1 ? "" : "s"}`
+                : `${updatedItems.length} conversation update${updatedItems.length === 1 ? "" : "s"}`;
+          new Notification(title, {
             body: first.user_message || first.reason || "Open Ruby Support",
             tag: "ruby-slack-support-handoff",
           });
@@ -610,11 +1143,13 @@
     const mergeQueueTask = useCallback((updatedTask) => {
       if (!updatedTask) return;
       setQueue((current) => {
-        const next = current.filter((item) => item.task_id !== updatedTask.task_id);
-        if (updatedTask.status === "open" || updatedTask.status === "claimed") {
-          next.unshift(updatedTask);
-        }
-        return next.sort((a, b) => safeValue(b.created_at).localeCompare(safeValue(a.created_at)));
+        const next = current
+          .filter((item) => item.task_id !== updatedTask.task_id)
+          .filter((item) => !(updatedTask.conversation_id && item.conversation_id === updatedTask.conversation_id));
+        next.unshift(updatedTask);
+        next.sort(compareRecentTasks);
+        syncTaskStateSnapshot(next, seenTaskStateRef);
+        return next;
       });
     }, []);
 
@@ -624,6 +1159,7 @@
         setProfiles([]);
         setActiveProfileId("");
         rememberProfileId("");
+        setSessionLinks([]);
         setQueue([]);
         resetSelection();
         setError("Restart Hermes Dashboard to load the updated Ruby Support backend, then reopen this tab.");
@@ -641,9 +1177,16 @@
         : nextProfiles.length
           ? nextProfiles[0].id
           : "";
+      activeProfileRef.current = nextActive;
       setActiveProfileId(nextActive);
       rememberProfileId(nextActive);
+      setSessionLinks(
+        nextActive && nextConfig && nextConfig.active_profile_id === nextActive && Array.isArray(nextConfig.session_links)
+          ? nextConfig.session_links
+          : [],
+      );
       if (!nextProfiles.length) {
+        setSessionLinks([]);
         setQueue([]);
         resetSelection();
       }
@@ -658,53 +1201,151 @@
       }
     }, [applyProfiles]);
 
+    const loadSessionLinks = useCallback(
+      async (profileId = activeProfileId) => {
+        if (!profileId) {
+          setSessionLinks([]);
+          return;
+        }
+        const requestId = linksRequestRef.current + 1;
+        linksRequestRef.current = requestId;
+        try {
+          const response = await apiFetch(withProfile("/session-links", profileId));
+          if (linksRequestRef.current !== requestId || activeProfileRef.current !== profileId) return;
+          setSessionLinks(Array.isArray(response.links) ? response.links : []);
+        } catch (nextError) {
+          if (linksRequestRef.current !== requestId || activeProfileRef.current !== profileId) return;
+          setError(formatDetail(nextError));
+        }
+      },
+      [activeProfileId],
+    );
+
+    const persistSessionLink = useCallback(
+      async (taskLike, payload) => {
+        const taskId = safeValue(taskLike && taskLike.task_id).trim();
+        if (!taskId || !activeProfileId) return null;
+        const response = await apiFetch(withProfile(`/session-links/${encodeURIComponent(taskId)}`, activeProfileId), {
+          method: "PUT",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(payload || {}),
+        });
+        setSessionLinks(Array.isArray(response.links) ? response.links : []);
+        return response.link || null;
+      },
+      [activeProfileId],
+    );
+
+    const removeSessionLink = useCallback(
+      async (taskId) => {
+        const cleanTaskId = safeValue(taskId).trim();
+        if (!cleanTaskId || !activeProfileId) return;
+        try {
+          const response = await apiFetch(withProfile(`/session-links/${encodeURIComponent(cleanTaskId)}`, activeProfileId), {
+            method: "DELETE",
+          });
+          setSessionLinks(Array.isArray(response.links) ? response.links : []);
+        } catch (nextError) {
+          setError(formatDetail(nextError));
+        }
+      },
+      [activeProfileId],
+    );
+
     const loadQueue = useCallback(
       async (options = {}) => {
         if (!activeProfileId) return;
+        const requestId = queueRequestRef.current + 1;
+        queueRequestRef.current = requestId;
+        const profileId = activeProfileId;
         if (!options.silent) setLoadingQueue(true);
         setError("");
         try {
-          const response = await apiFetch(withProfile("/handoffs?status=active&limit=30", activeProfileId));
+          const response = await apiFetch(withProfile(`/handoffs?status=all&limit=${queueLimit}`, profileId));
+          if (queueRequestRef.current !== requestId || activeProfileRef.current !== profileId) return;
           const tasks = response.tasks || [];
-          const nextNew = tasks.filter((item) => item.task_id && !seenIdsRef.current.has(item.task_id));
+          const previousStates = seenTaskStateRef.current;
+          const nextStates = new Map();
+          const nextNew = [];
+          const nextUpdated = [];
           tasks.forEach((item) => {
-            if (item.task_id) seenIdsRef.current.add(item.task_id);
+            if (!item || !item.task_id) return;
+            const snapshot = {signature: taskActivitySignature(item)};
+            const previous = previousStates.get(item.task_id);
+            const shouldNotify = item.status === "open" || item.status === "claimed";
+            if (!previous && shouldNotify) nextNew.push(item);
+            else if (previous && previous.signature !== snapshot.signature && shouldNotify) nextUpdated.push(item);
+            nextStates.set(item.task_id, snapshot);
           });
-          setQueue(tasks);
+          seenTaskStateRef.current = nextStates;
+          setQueue(tasks.sort(compareRecentTasks));
           setLastRefresh(new Date().toLocaleTimeString());
-          if (options.detectNew) notifyNewTasks(nextNew);
+          if (options.detectNew) notifyTaskActivity(nextNew, nextUpdated);
         } catch (nextError) {
+          if (queueRequestRef.current !== requestId || activeProfileRef.current !== profileId) return;
           setError(formatDetail(nextError));
         } finally {
+          if (queueRequestRef.current !== requestId || activeProfileRef.current !== profileId) return;
           setLoadingQueue(false);
         }
       },
-      [activeProfileId, notifyNewTasks],
+      [activeProfileId, notifyTaskActivity, queueLimit],
     );
 
     const loadTask = useCallback(
-      async (id) => {
+      async (id, options = {}) => {
         const cleanId = (id || "").trim();
         if (!cleanId || !activeProfileId) return;
-        setLoadingTask(true);
-        setError("");
-        try {
-          const response = await apiFetch(withProfile(`/handoffs/${encodeURIComponent(cleanId)}`, activeProfileId));
-          setTaskData(response);
+        const requestId = taskRequestRef.current + 1;
+        taskRequestRef.current = requestId;
+        const profileId = activeProfileId;
+        const isNewSelection = selectedIdRef.current !== cleanId;
+        if (isNewSelection) {
+          selectedIdRef.current = cleanId;
           setSelectedId(cleanId);
+          setTaskData(null);
+          updateUrlTaskId(cleanId);
+        }
+        if (!options.preserveView) {
           setShowPrompt(false);
           setShowKnowledge(false);
           setShowDetails(false);
-          setReplyText("");
-          updateUrlTaskId(cleanId);
+        }
+        setLoadingTask(true);
+        setError("");
+        try {
+          const response = await apiFetch(withProfile(`/handoffs/${encodeURIComponent(cleanId)}`, profileId));
+          if (taskRequestRef.current !== requestId || activeProfileRef.current !== profileId) return;
+          setTaskData(response);
+          selectedIdRef.current = cleanId;
+          setSelectedId(cleanId);
+          if (!options.preserveReply) setReplyText(loadReplyDraft(profileId, cleanId));
           setNewTaskIds((current) => current.filter((taskId) => taskId !== cleanId));
         } catch (nextError) {
+          if (taskRequestRef.current !== requestId || activeProfileRef.current !== profileId) return;
           setError(formatDetail(nextError));
         } finally {
+          if (taskRequestRef.current !== requestId || activeProfileRef.current !== profileId) return;
           setLoadingTask(false);
         }
       },
       [activeProfileId, updateUrlTaskId],
+    );
+
+    const changeQueueView = useCallback(
+      (nextView) => {
+        setQueueView(nextView);
+        const nextVisible = queue.filter((item) => queueViewMatchesTask(nextView, item));
+        const currentSelectedId = selectedIdRef.current;
+        const selectedVisible = currentSelectedId && nextVisible.some((item) => item.task_id === currentSelectedId);
+        if (selectedVisible) return;
+        if (nextVisible.length) {
+          loadTask(nextVisible[0].task_id, {preserveReply: false, preserveView: true});
+          return;
+        }
+        resetSelection();
+      },
+      [loadTask, queue, resetSelection],
     );
 
     const runTaskAction = useCallback(
@@ -755,7 +1396,10 @@
           mergeQueueTask(response.task);
           setReplyText("");
           appendRunLine(mode === "complete" ? "Reply sent and handoff completed." : "Reply sent.");
-          if (mode === "complete") loadQueue({silent: true, detectNew: false});
+          if (mode === "complete") {
+            await removeSessionLink(task.task_id);
+            loadQueue({silent: true, detectNew: false});
+          }
         } catch (nextError) {
           setError(formatDetail(nextError));
           appendRunLine(`Reply failed: ${formatDetail(nextError)}`);
@@ -763,7 +1407,7 @@
           setReplyBusy("");
         }
       },
-      [activeProfileId, appendRunLine, loadQueue, mergeQueueTask, replyText, task],
+      [activeProfileId, appendRunLine, loadQueue, mergeQueueTask, removeSessionLink, replyText, task],
     );
 
     const openNewProfile = useCallback(() => {
@@ -825,10 +1469,21 @@
     const activateProfile = useCallback(
       async (profileId) => {
         if (!profileId) return;
+        activeProfileRef.current = profileId;
         setActiveProfileId(profileId);
         rememberProfileId(profileId);
+        if (activityTimerRef.current) {
+          window.clearTimeout(activityTimerRef.current);
+          activityTimerRef.current = 0;
+        }
         resetSelection();
-        seenIdsRef.current = new Set();
+        setSessionLinks([]);
+        setQueue([]);
+        setLaunchState({open: false, phase: "idle", mode: "start", taskId: "", sessionId: "", error: ""});
+        linksRequestRef.current += 1;
+        seenTaskStateRef.current = new Map();
+        queueRequestRef.current += 1;
+        taskRequestRef.current += 1;
         try {
           await apiFetch(`/profiles/${encodeURIComponent(profileId)}/activate`, {method: "POST"});
         } catch (nextError) {
@@ -840,17 +1495,22 @@
 
     const deleteSelectedProfile = useCallback(async () => {
       if (!selectedProfile || selectedProfile.read_only) return;
-      const confirmed = window.confirm(`Remove ${selectedProfile.brand} / ${selectedProfile.environment_label || selectedProfile.environment}?`);
+      const confirmed = await requestConfirmation({
+        title: "Remove profile",
+        message: `Remove ${selectedProfile.brand} / ${selectedProfile.environment_label || selectedProfile.environment}?`,
+        confirmLabel: "Remove",
+      });
       if (!confirmed) return;
       setError("");
       try {
         await apiFetch(`/profiles/${encodeURIComponent(selectedProfile.id)}`, {method: "DELETE"});
         rememberProfileId("");
+        setSessionLinks([]);
         await loadConfig();
       } catch (nextError) {
         setError(formatDetail(nextError));
       }
-    }, [loadConfig, selectedProfile]);
+    }, [loadConfig, requestConfirmation, selectedProfile]);
 
     const copyPrompt = useCallback(async () => {
       if (!prompt) return;
@@ -868,11 +1528,11 @@
     }, []);
 
     const submitPromptToHermes = useCallback(
-      async (handoffPrompt) => {
+      async ({handoffPrompt, existingSessionId, mode}) => {
         if (!handoffPrompt) return;
         setError("");
-        setSessionId("");
         setRunLines(["Connecting to local Hermes gateway..."]);
+        let ws = null;
 
         try {
           if (wsRef.current) {
@@ -881,7 +1541,7 @@
           }
           if (!SDK.buildWsUrl) throw new Error("Hermes plugin SDK did not expose buildWsUrl.");
 
-          const ws = new WebSocket(await SDK.buildWsUrl("/api/ws"));
+          ws = new WebSocket(await SDK.buildWsUrl("/api/ws"));
           wsRef.current = ws;
           let nextId = 1;
           const pending = new Map();
@@ -922,47 +1582,334 @@
             });
           }
 
-          appendRunLine("Creating Hermes session...");
-          const created = await call("session.create", {cols: 96, rows: 30});
-          const createdSessionId = created && (created.session_id || created.id || (created.session && created.session.id));
-          if (!createdSessionId) throw new Error("Hermes did not return a session id.");
+          let gatewaySessionId = safeValue(existingSessionId).trim();
+          if (!gatewaySessionId) {
+            appendRunLine("Creating Hermes session...");
+            const created = await call("session.create", {cols: 96, rows: 30});
+            gatewaySessionId = created && (created.session_id || created.id || (created.session && created.session.id));
+          } else {
+            appendRunLine(`Reusing session ${gatewaySessionId}...`);
+          }
+          if (!gatewaySessionId) throw new Error("Hermes did not return a session id.");
 
-          appendRunLine("Submitting handoff prompt...");
-          await call("prompt.submit", {session_id: createdSessionId, text: handoffPrompt});
-          setSessionId(createdSessionId);
-          appendRunLine(`Submitted to session ${createdSessionId}.`);
+          appendRunLine(mode === "update" ? "Sending latest context..." : "Submitting handoff prompt...");
+          await call("prompt.submit", {session_id: gatewaySessionId, text: handoffPrompt});
+          appendRunLine(mode === "update" ? `Updated session ${gatewaySessionId}.` : `Submitted to session ${gatewaySessionId}.`);
+          return {gatewaySessionId, reused: Boolean(existingSessionId)};
         } catch (nextError) {
           setError(formatDetail(nextError));
-          appendRunLine(`Failed: ${formatDetail(nextError)}`);
+          throw nextError;
+        } finally {
+          if (wsRef.current === ws) wsRef.current = null;
+          if (ws) {
+            try {
+              ws.close();
+            } catch (_error) {
+              // Ignore close failures after prompt submission.
+            }
+          }
         }
       },
       [appendRunLine],
     );
 
-    const claimAndStart = useCallback(async () => {
-      if (!task) return;
-      let nextTaskData = taskData;
-      if (task.status === "open") {
-        const claimed = await runTaskAction("claim");
-        if (!claimed) return;
-        nextTaskData = claimed;
+    const resolveDashboardSessionId = useCallback(
+      async (baselineSessions, startedAtMs) => {
+        const knownIds = new Set((baselineSessions || []).map((session) => session && session.id).filter(Boolean));
+        for (let attempt = 0; attempt < 5; attempt += 1) {
+          if (attempt > 0) await new Promise((resolve) => window.setTimeout(resolve, attempt * 250));
+          const sessions = await listDashboardSessions(10);
+          const fresh = sessions.find((session) => session && session.id && !knownIds.has(session.id));
+          if (fresh && fresh.id) return fresh.id;
+          const recent = sessions.find((session) => {
+            if (!session || !session.id) return false;
+            const startedAt = typeof session.started_at === "number" ? session.started_at * 1000 : Number(session.started_at || 0) * 1000;
+            return startedAt >= startedAtMs - 5000;
+          });
+          if (recent && recent.id) return recent.id;
+        }
+        return "";
+      },
+      [],
+    );
+
+    const verifyHermesSession = useCallback(async (sessionId) => {
+      const cleanSessionId = safeValue(sessionId).trim();
+      if (!cleanSessionId) return false;
+      try {
+        await dashboardFetch(`/api/sessions/${encodeURIComponent(cleanSessionId)}/messages`);
+        return true;
+      } catch (nextError) {
+        if (nextError && (nextError.status === 404 || nextError.status === 410)) return false;
+        throw nextError;
       }
-      await submitPromptToHermes(nextTaskData && nextTaskData.prompt ? nextTaskData.prompt : prompt);
-    }, [prompt, runTaskAction, submitPromptToHermes, task, taskData]);
+    }, []);
+
+    const openHermesSession = useCallback(
+      async (taskOverride, linkOverride) => {
+        const nextTask = taskOverride || task;
+        const nextLink = linkOverride || (nextTask && nextTask.task_id ? sessionLinkMap.get(nextTask.task_id) || null : null);
+        const resumeId = sessionResumeId(nextLink);
+        if (!nextTask || !nextLink || !resumeId) return false;
+        try {
+          const exists = await verifyHermesSession(resumeId);
+          if (!exists) {
+            await persistSessionLink(nextTask, {
+              dashboard_session_id: resumeId,
+              gateway_session_id: sessionGatewayId(nextLink),
+              conversation_id: nextTask.conversation_id,
+              task_label: taskShortTitle(nextTask),
+              state: "stale",
+              last_task_signature: nextLink.last_task_signature,
+              last_task_updated_at: nextLink.last_task_updated_at,
+              last_opened_at: nextLink.last_opened_at,
+              last_error: "The saved Hermes session could not be found from the local dashboard.",
+            });
+            setError("The saved Hermes session could not be reopened. Start Hermes again.");
+            return false;
+          }
+          try {
+            await persistSessionLink(nextTask, {
+              dashboard_session_id: resumeId,
+              gateway_session_id: sessionGatewayId(nextLink),
+              conversation_id: nextTask.conversation_id,
+              task_label: taskShortTitle(nextTask),
+              state: "ready",
+              last_task_signature: nextLink.last_task_signature,
+              last_task_updated_at: nextLink.last_task_updated_at,
+              last_opened_at: String(Date.now()),
+              last_error: "",
+            });
+          } catch (_error) {
+            // Session navigation should still work even if local metadata refresh fails.
+          }
+          window.location.assign(buildChatResumeUrl(resumeId));
+          return true;
+        } catch (nextError) {
+          setError(formatDetail(nextError));
+          return false;
+        }
+      },
+      [persistSessionLink, sessionLinkMap, task, verifyHermesSession],
+    );
+
+    const triggerHermesLaunch = useCallback(
+      async (options = {}) => {
+        const currentTask = options.task || task;
+        if (!currentTask) return false;
+        const existingLink = options.link || (currentTask.task_id ? sessionLinkMap.get(currentTask.task_id) || null : null);
+        const currentMode = options.mode || (!existingLink ? "start" : taskNeedsHermesSync(currentTask, existingLink) ? "update" : "start");
+        let nextMode = currentMode;
+        let nextTaskData = taskData;
+        let nextTask = currentTask;
+        setLaunchState({
+          open: true,
+          phase: "running",
+          mode: nextMode,
+          taskId: currentTask.task_id,
+          sessionId: sessionResumeId(existingLink) || sessionGatewayId(existingLink),
+          error: "",
+        });
+
+        try {
+          if (currentTask.status === "open") {
+            const claimed = await runTaskAction("claim", {taskId: currentTask.task_id});
+            if (!claimed || !claimed.task) {
+              const message = "Could not claim the handoff before starting Hermes.";
+              setLaunchState({
+                open: true,
+                phase: "error",
+                mode: nextMode,
+                taskId: currentTask.task_id,
+                sessionId: "",
+                error: message,
+              });
+              return false;
+            }
+            nextTaskData = claimed;
+            nextTask = claimed.task;
+          }
+
+          let gatewaySessionId = options.restart ? "" : sessionGatewayId(existingLink);
+          const beforeSessions = gatewaySessionId ? [] : await listDashboardSessions(10);
+          const startedAtMs = Date.now();
+          if (gatewaySessionId) {
+            const exists = await verifyHermesSession(sessionResumeId(existingLink) || gatewaySessionId);
+            if (!exists) {
+              await persistSessionLink(nextTask, {
+                dashboard_session_id: sessionResumeId(existingLink),
+                gateway_session_id: gatewaySessionId,
+                conversation_id: nextTask.conversation_id,
+                task_label: taskShortTitle(nextTask),
+                state: "stale",
+                last_task_signature: safeValue(existingLink && existingLink.last_task_signature).trim(),
+                last_task_updated_at: safeValue(existingLink && existingLink.last_task_updated_at).trim(),
+                last_opened_at: safeValue(existingLink && existingLink.last_opened_at).trim(),
+                last_error: "The saved Hermes session is no longer available.",
+              });
+              gatewaySessionId = "";
+              nextMode = "restart";
+            }
+          }
+
+          const handoffPrompt = nextTaskData && nextTaskData.prompt ? nextTaskData.prompt : prompt;
+          if (!handoffPrompt) throw new Error("Prompt context is not available for this handoff.");
+
+          const submitted = await submitPromptToHermes({
+            handoffPrompt: gatewaySessionId ? buildHermesUpdatePrompt(handoffPrompt) : handoffPrompt,
+            existingSessionId: gatewaySessionId,
+            mode: gatewaySessionId ? "update" : "start",
+          });
+          if (!submitted || !submitted.gatewaySessionId) throw new Error("Hermes did not confirm the session launch.");
+
+          const dashboardSessionId = gatewaySessionId
+            ? sessionResumeId(existingLink)
+            : await resolveDashboardSessionId(beforeSessions, startedAtMs);
+          const resumableSessionId = dashboardSessionId || submitted.gatewaySessionId;
+
+          await persistSessionLink(nextTask, {
+            dashboard_session_id: dashboardSessionId,
+            gateway_session_id: submitted.gatewaySessionId,
+            conversation_id: nextTask.conversation_id,
+            task_label: taskShortTitle(nextTask),
+            state: "ready",
+            last_task_signature: taskActivitySignature(nextTask),
+            last_task_updated_at: safeValue(nextTask.updated_at || nextTask.created_at).trim(),
+            last_opened_at: safeValue(existingLink && existingLink.last_opened_at).trim(),
+            last_error: "",
+          });
+
+          setLaunchState({
+            open: true,
+            phase: "ready",
+            mode: gatewaySessionId ? "update" : nextMode,
+            taskId: nextTask.task_id,
+            sessionId: resumableSessionId,
+            error: "",
+          });
+          return true;
+        } catch (nextError) {
+          const message = formatDetail(nextError);
+          setError(message);
+          appendRunLine(`Failed: ${message}`);
+          setLaunchState((current) => ({
+            ...current,
+            open: true,
+            phase: "error",
+            error: message,
+          }));
+          return false;
+        }
+      },
+      [appendRunLine, persistSessionLink, prompt, resolveDashboardSessionId, runTaskAction, sessionLinkMap, submitPromptToHermes, task, taskData, verifyHermesSession],
+    );
+
+    const handleHermesPrimaryAction = useCallback(async () => {
+      if (!task) return;
+      if (!selectedSessionLink) {
+        await triggerHermesLaunch({mode: "start"});
+        return;
+      }
+      if (selectedSessionLink.state === "stale" || selectedSessionLink.state === "error") {
+        await triggerHermesLaunch({mode: "restart", restart: true, link: selectedSessionLink});
+        return;
+      }
+      if (sessionHasPendingSync) {
+        await triggerHermesLaunch({mode: "update", link: selectedSessionLink});
+        return;
+      }
+      await openHermesSession(task, selectedSessionLink);
+    }, [openHermesSession, selectedSessionLink, sessionHasPendingSync, task, triggerHermesLaunch]);
+
+    const completeSelectedTask = useCallback(async () => {
+      if (!task) return;
+      const label = task.conversation_id ? `Conversation #${task.conversation_id}` : task.task_id;
+      const confirmed = await requestConfirmation({
+        title: "Complete conversation",
+        message: `Complete ${label} and remove it from the active queue?`,
+        confirmLabel: "Complete",
+      });
+      if (!confirmed) return;
+      const completed = await runTaskAction("complete");
+      if (completed && completed.task && completed.task.status === "completed") {
+        await removeSessionLink(task.task_id);
+        await loadQueue({silent: true, detectNew: false});
+      }
+    }, [loadQueue, removeSessionLink, requestConfirmation, runTaskAction, task]);
+
+    const resumeSelectedTask = useCallback(async () => {
+      if (!task || !activeProfileId) return;
+      setActionBusy("resume");
+      setError("");
+      try {
+        const response = await apiFetch(withProfile(`/handoffs/${encodeURIComponent(task.task_id)}/resume`, activeProfileId), {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({}),
+        });
+        if (task.task_id) await removeSessionLink(task.task_id);
+        setTaskData(response);
+        setSelectedId(response.task.task_id);
+        setReplyText(loadReplyDraft(activeProfileId, response.task.task_id));
+        setQueueView("active");
+        updateUrlTaskId(response.task.task_id);
+        mergeQueueTask(response.task);
+        appendRunLine("Conversation resumed.");
+        await loadQueue({silent: true, detectNew: false});
+        return response;
+      } catch (nextError) {
+        setError(formatDetail(nextError));
+        appendRunLine(`resume failed: ${formatDetail(nextError)}`);
+        return null;
+      } finally {
+        setActionBusy("");
+      }
+    }, [activeProfileId, appendRunLine, loadQueue, mergeQueueTask, removeSessionLink, task, updateUrlTaskId]);
+
+    const sendReplyAndComplete = useCallback(async () => {
+      if (!task || !replyText.trim()) return;
+      const label = task.conversation_id ? `Conversation #${task.conversation_id}` : task.task_id;
+      const confirmed = await requestConfirmation({
+        title: "Send and complete",
+        message: `Send this reply to ${label} and complete the handoff?`,
+        confirmLabel: "Send & complete",
+      });
+      if (!confirmed) return;
+      await sendHandoffReply("complete");
+    }, [replyText, requestConfirmation, sendHandoffReply, task]);
+
+    useEffect(() => {
+      activeProfileRef.current = activeProfileId;
+    }, [activeProfileId]);
+
+    useEffect(() => {
+      selectedIdRef.current = selectedId;
+    }, [selectedId]);
 
     useEffect(() => {
       loadConfig();
       return () => {
         if (wsRef.current) wsRef.current.close();
+        if (activityTimerRef.current) window.clearTimeout(activityTimerRef.current);
+        if (confirmResolverRef.current) {
+          confirmResolverRef.current(false);
+          confirmResolverRef.current = null;
+        }
       };
     }, [loadConfig]);
 
     useEffect(() => {
+      if (!activeProfileId || !selectedId) return;
+      persistReplyDraft(activeProfileId, selectedId, replyText);
+    }, [activeProfileId, replyText, selectedId]);
+
+    useEffect(() => {
       if (!activeProfileId) return;
+      loadSessionLinks(activeProfileId);
       loadQueue({silent: false, detectNew: false});
       const initialTaskId = getQueryTaskId();
       if (initialTaskId) loadTask(initialTaskId);
-    }, [activeProfileId, loadQueue, loadTask]);
+    }, [activeProfileId, loadQueue, loadSessionLinks, loadTask]);
 
     useEffect(() => {
       if (!pollEnabled || !activeProfileId) return undefined;
@@ -971,6 +1918,33 @@
       }, pollMs);
       return () => window.clearInterval(timer);
     }, [activeProfileId, loadQueue, pollEnabled]);
+
+    useEffect(() => {
+      if (!selectedId || loadingTask) return;
+      const summary = queue.find((item) => item.task_id === selectedId);
+      const currentTask = taskData && taskData.task ? taskData.task : null;
+      if (!summary) {
+        if (taskStillActive(currentTask) && queue.length < queueLimit) loadTask(selectedId, {preserveReply: true, preserveView: true});
+        return;
+      }
+      if (currentTask && taskSummaryChanged(summary, currentTask)) {
+        loadTask(selectedId, {preserveReply: true, preserveView: true});
+      }
+    }, [loadTask, loadingTask, queue, queueLimit, selectedId, taskData]);
+
+    useEffect(() => {
+      if (!selectedId || loadingTask) return;
+      const selectedVisible = filteredQueue.some((item) => item.task_id === selectedId);
+      if (selectedVisible) return;
+      if (filteredQueue.length) {
+        loadTask(filteredQueue[0].task_id, {preserveReply: false, preserveView: true});
+        return;
+      }
+      const currentTask = taskData && taskData.task ? taskData.task : null;
+      if (currentTask && !queueViewMatchesTask(queueView, currentTask)) {
+        resetSelection();
+      }
+    }, [filteredQueue, loadTask, loadingTask, queueView, resetSelection, selectedId, taskData]);
 
     useEffect(() => {
       if (!setupOpen) return undefined;
@@ -985,6 +1959,24 @@
     }, [profileSaving, profileTesting, setupOpen]);
 
     useEffect(() => {
+      if (!launchState.open) return undefined;
+      const onKeyDown = (event) => {
+        if (event.key === "Escape") closeLaunchModal();
+      };
+      window.addEventListener("keydown", onKeyDown);
+      return () => window.removeEventListener("keydown", onKeyDown);
+    }, [closeLaunchModal, launchState.open]);
+
+    useEffect(() => {
+      if (!confirmState || !confirmState.open) return undefined;
+      const onKeyDown = (event) => {
+        if (event.key === "Escape") resolveConfirmation(false);
+      };
+      window.addEventListener("keydown", onKeyDown);
+      return () => window.removeEventListener("keydown", onKeyDown);
+    }, [confirmState, resolveConfirmation]);
+
+    useEffect(() => {
       const originalTitle = document.title;
       const count = openCount + claimedCount;
       if (count > 0) document.title = `(${count}) Ruby Support`;
@@ -997,6 +1989,20 @@
     const canRelease = task && task.status === "claimed";
     const canComplete = task && task.status !== "completed";
     const canReply = task && task.status !== "completed";
+    const queueSummary = selectedProfile
+      ? [
+          `${filteredQueue.length} shown`,
+          `${openCount} open`,
+          `${claimedCount} claimed`,
+          `${completedCount} completed`,
+          `${queueViewLabel(queueView)} view`,
+          queue.length >= queueLimit ? `latest ${queueLimit} loaded` : null,
+          lastRefresh || "not refreshed",
+        ].filter(Boolean).join(" · ")
+      : "No profile selected";
+    const launchTask = launchState.taskId
+      ? (task && task.task_id === launchState.taskId ? task : queue.find((item) => item.task_id === launchState.taskId) || task)
+      : task;
 
     return h(
       "div",
@@ -1012,9 +2018,9 @@
           h(Button, {onClick: enableBrowserAlerts}, alertsEnabled ? "Alerts on" : "Enable alerts"),
         ),
       ),
-      error && !setupOpen ? h("div", {className: "rss-error"}, error) : null,
-      newTaskIds.length
-        ? h("div", {className: "rss-alert"}, `${newTaskIds.length} new handoff${newTaskIds.length > 1 ? "s" : ""} waiting in the queue.`)
+      error && !setupOpen && !launchState.open ? h("div", {className: "rss-error"}, error) : null,
+      activityNotice
+        ? h("div", {className: "rss-alert"}, activityNotice)
         : null,
       setupOpen
         ? h(ProfileForm, {
@@ -1034,6 +2040,28 @@
             onTest: () => saveProfile(true),
           })
         : null,
+      confirmState
+        ? h(ConfirmModal, {
+            state: confirmState,
+            onCancel: () => resolveConfirmation(false),
+            onConfirm: () => resolveConfirmation(true),
+          })
+        : null,
+      launchState.open
+        ? h(HermesLaunchModal, {
+            launchState,
+            task: launchTask,
+            runLines,
+            onClose: closeLaunchModal,
+            onOpenSession: () => {
+              if (launchTask) {
+                openHermesSession(launchTask);
+                return;
+              }
+              if (launchState.sessionId) window.location.assign(buildChatResumeUrl(launchState.sessionId));
+            },
+          })
+        : null,
       h(
         "div",
         {className: "rss-workbench"},
@@ -1046,8 +2074,8 @@
             h(
               "div",
               null,
-              h("h2", null, "Queue"),
-              h("p", null, selectedProfile ? `${openCount} open · ${claimedCount} claimed · ${lastRefresh || "not refreshed"}` : "No profile selected"),
+              h("h2", null, "Conversations"),
+              h("p", null, queueSummary),
             ),
             h(Button, {disabled: loadingQueue || !selectedProfile, onClick: () => loadQueue({silent: false, detectNew: false})}, loadingQueue ? "Loading" : "Refresh"),
           ),
@@ -1061,21 +2089,52 @@
             onEdit: openEditProfile,
             onRemove: deleteSelectedProfile,
           }),
-          queue.length
+          selectedProfile
+            ? h(
+                "div",
+                {className: "rss-filters"},
+                QUEUE_VIEWS.map((view) =>
+                  h(
+                    Button,
+                    {
+                      key: view.id,
+                      kind: queueView === view.id ? "primary" : "secondary",
+                      disabled: loadingQueue,
+                      onClick: () => changeQueueView(view.id),
+                    },
+                    view.label,
+                  ),
+                ),
+              )
+            : null,
+          filteredQueue.length
             ? h(
                 "div",
                 {className: "rss-list"},
-                queue.map((item) =>
+                filteredQueue.map((item) =>
                   h(QueueRow, {
                     key: item.task_id,
                     task: item,
                     selected: item.task_id === selectedId,
                     isNew: newTaskIds.includes(item.task_id),
+                    sessionLink: sessionLinkMap.get(item.task_id) || null,
+                    pendingSync: taskNeedsHermesSync(item, sessionLinkMap.get(item.task_id) || null),
+                    launchBusy: launchState.phase === "running" && launchState.taskId === item.task_id,
                     onSelect: loadTask,
                   }),
                 ),
               )
-            : h("div", {className: "rss-empty"}, selectedProfile ? "No active handoffs." : "Add a profile to start polling."),
+            : h(
+                "div",
+                {className: "rss-empty"},
+                selectedProfile
+                  ? queueView === "completed"
+                    ? "No completed conversations."
+                    : queueView === "all"
+                      ? "No conversations loaded."
+                      : "No pending conversations."
+                  : "Add a profile to start polling.",
+              ),
         ),
         h(
           "section",
@@ -1084,11 +2143,11 @@
             ? h(
                 React.Fragment,
                 null,
-                h(
-                  "div",
-                  {className: "rss-section-head"},
-                  h("div", null, h("h2", null, `Conversation #${task.conversation_id || ""}`), h("p", null, loadingTask ? "Loading task..." : taskStatusLine(task))),
                   h(
+                    "div",
+                    {className: "rss-section-head"},
+                    h("div", null, h("h2", null, taskDisplayLabel(task)), h("p", null, loadingTask ? "Loading task..." : taskStatusLine(task))),
+                    h(
                     "div",
                     {className: "rss-actions"},
                     context.conversation_url ? h(Button, {href: context.conversation_url}, "Open Chatwoot") : null,
@@ -1096,31 +2155,48 @@
                     canClaim ? h(Button, {disabled: actionBusy === "claim", onClick: () => runTaskAction("claim")}, actionBusy === "claim" ? "Claiming" : "Claim") : null,
                     canRelease ? h(Button, {disabled: actionBusy === "release", onClick: () => runTaskAction("release")}, actionBusy === "release" ? "Releasing" : "Release") : null,
                     canComplete
-                      ? h(Button, {disabled: actionBusy === "complete", onClick: () => runTaskAction("complete")}, actionBusy === "complete" ? "Completing" : "Complete")
+                      ? h(Button, {disabled: actionBusy === "complete", onClick: completeSelectedTask}, actionBusy === "complete" ? "Completing" : "Complete")
                       : null,
-                    h(Button, {kind: "primary", onClick: claimAndStart}, task.status === "open" ? "Claim & start" : "Start Hermes"),
                   ),
                 ),
                 reviewNotice(task) ? h("div", {className: "rss-review-notice"}, reviewNotice(task)) : null,
+                h(HermesSessionPanel, {
+                  task,
+                  sessionLink: selectedSessionLink,
+                  pendingSync: sessionHasPendingSync,
+                  launchBusy: sessionLaunchBusy,
+                  onPrimaryAction: handleHermesPrimaryAction,
+                  onOpenSession: () => openHermesSession(task, selectedSessionLink),
+                  onResume: resumeSelectedTask,
+                }),
                 h(
                   "section",
                   {className: "rss-conversation-block"},
                   h(
                     "div",
                     {className: "rss-subsection-head"},
-                    h("div", null, h("h3", null, "Conversation"), h("p", null, `${messages.length} message${messages.length === 1 ? "" : "s"} · full context for Hermes`)),
+                    h(
+                      "div",
+                      null,
+                      h("h3", null, "Conversation"),
+                      h("p", null, workerConversationLoaded
+                        ? `${messages.length} message${messages.length === 1 ? "" : "s"} · full context for Hermes`
+                        : `${messages.length} message${messages.length === 1 ? "" : "s"} · latest message fallback`),
+                    ),
                     context.conversation_url ? h(Button, {href: context.conversation_url}, "Open full Chatwoot") : null,
                   ),
-                  h(ConversationThread, {messages}),
+                  h(ConversationThread, {messages, task}),
                 ),
-                h(ReplyComposer, {
-                  value: replyText,
-                  disabled: !canReply,
-                  busy: replyBusy,
-                  onChange: setReplyText,
-                  onSendReply: () => sendHandoffReply("reply"),
-                  onSendAndComplete: () => sendHandoffReply("complete"),
-                }),
+                canReply
+                  ? h(ReplyComposer, {
+                      value: replyText,
+                      disabled: !canReply,
+                      busy: replyBusy,
+                      onChange: setReplyText,
+                      onSendReply: () => sendHandoffReply("reply"),
+                      onSendAndComplete: sendReplyAndComplete,
+                    })
+                  : h(CompletedPanel, {task}),
                 hasKnowledgeResult(task) ? h(KnowledgePanel, {task, show: showKnowledge, onToggle: () => setShowKnowledge((value) => !value)}) : null,
                 h(
                   "section",
@@ -1134,21 +2210,28 @@
                   showPrompt ? h(Field, {label: "Prompt preview", value: prompt, multiline: true}) : null,
                 ),
                 h(DetailsPanel, {task, show: showDetails, onToggle: () => setShowDetails((value) => !value)}),
-                sessionId ? h("div", {className: "rss-session"}, "Session: ", h("code", null, sessionId)) : null,
-                runLines.length ? h("div", {className: "rss-log"}, runLines.map((line, index) => h("div", {key: `${line}-${index}`}, line))) : null,
               )
-            : h(
-                "div",
-                {className: "rss-empty rss-empty-large"},
-                h("h2", null, selectedProfile ? "Select a handoff" : "No profile selected"),
-                h(
-                  "p",
-                  null,
-                  selectedProfile
-                    ? "Select one to review context, claim it, and start a local Hermes session."
-                    : "Use Add profile to connect a brand.",
-                ),
-              ),
+            : selectedId && detailLoading
+              ? h(LoadingConversationPanel, {task: selectedSummary || {task_id: selectedId}})
+              : selectedId
+                ? h(
+                    "div",
+                    {className: "rss-empty rss-empty-large"},
+                    h("h2", null, taskDisplayLabel(selectedSummary || {task_id: selectedId})),
+                    h("p", null, error ? "Could not load the latest conversation. Refresh and try again." : "Conversation details are unavailable right now."),
+                  )
+                : h(
+                    "div",
+                    {className: "rss-empty rss-empty-large"},
+                    h("h2", null, selectedProfile ? "Select a conversation" : "No profile selected"),
+                    h(
+                      "p",
+                      null,
+                      selectedProfile
+                        ? "Select one to review context, start Hermes, and continue the support workflow."
+                        : "Use Add profile to connect a brand.",
+                    ),
+                  ),
         ),
       ),
     );
