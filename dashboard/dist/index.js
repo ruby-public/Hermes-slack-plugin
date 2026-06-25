@@ -244,6 +244,23 @@
     return [customer.loginLabel, customer.account, customer.domain].filter(Boolean).join(" · ");
   }
 
+  function queueCustomerLabel(task) {
+    const customer = customerContext(task);
+    if (customer.account) return customer.account;
+    if (customer.loginLabel) return customer.loginLabel;
+    return "Visitor";
+  }
+
+  function queueContextLine(task) {
+    const customer = customerContext(task);
+    const parts = [];
+    if (customer.loginLabel) parts.push(customer.loginLabel);
+    if (customer.domain) parts.push(customer.domain);
+    if (customer.ip) parts.push(customer.ip);
+    if (customer.device) parts.push(customer.device);
+    return parts.filter(Boolean).join(" · ");
+  }
+
   function compactUrl(value) {
     const text = safeValue(value).trim();
     if (!text) return "";
@@ -726,7 +743,8 @@
     const hermesLabel = launchBusy ? "Starting Hermes" : hermesSessionLabel(sessionLink, pendingSync);
     const conversationLabel = task.conversation_id ? `Conversation #${task.conversation_id}` : task.task_id;
     const timestamp = task.status === "completed" ? task.completed_at || task.updated_at || task.created_at : task.updated_at || task.created_at;
-    const customerSummary = customerSummaryLine(task);
+    const customerLabel = queueCustomerLabel(task);
+    const contextLine = queueContextLine(task);
     return h(
       "button",
       {
@@ -739,9 +757,14 @@
         h(Chip, {tone}, task.status || "open"),
         h("span", {className: "rss-row-assignee"}, assignee),
       ),
-      h("span", {className: "rss-row-main"}, task.user_message || task.task_id),
-      customerSummary ? h("span", {className: "rss-row-customer"}, customerSummary) : null,
-      h("span", {className: "rss-row-sub"}, `${conversationLabel} · ${formatDateTime(timestamp)}`),
+      h(
+        "span",
+        {className: "rss-row-title"},
+        h("span", {className: "rss-row-main"}, conversationLabel),
+        h("span", {className: "rss-row-person"}, customerLabel),
+      ),
+      contextLine ? h("span", {className: "rss-row-customer"}, contextLine) : null,
+      h("span", {className: "rss-row-sub"}, `Updated ${formatDateTime(timestamp)}`),
       sessionLink || launchBusy
         ? h(
             "span",

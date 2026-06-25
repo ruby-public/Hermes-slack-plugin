@@ -771,12 +771,27 @@
 }
 
 .rss-row-main {
-  display: -webkit-box;
+  color: var(--text-primary, #f4f1ff);
   font-size: 14px;
-  line-height: 1.45;
+  font-weight: 650;
+  line-height: 1.25;
   overflow: hidden;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rss-row-title {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.rss-row-person {
+  color: var(--text-secondary, #a8a0bc);
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .rss-chip {
