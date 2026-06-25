@@ -488,6 +488,47 @@
   padding-right: 2px;
 }
 
+.rss-queue-loading {
+  align-items: center;
+  background: rgba(0, 0, 0, 0.18);
+  border: 1px solid rgba(255, 244, 222, 0.18);
+  border-radius: 8px;
+  color: var(--text-primary, #f4f1ff);
+  display: flex;
+  gap: 12px;
+  min-height: 82px;
+  padding: 14px;
+}
+
+.rss-queue-loading strong {
+  display: block;
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.25;
+}
+
+.rss-queue-loading p {
+  color: var(--text-secondary, #bdb5cf);
+  font-size: 12px;
+  margin: 4px 0 0;
+}
+
+.rss-spinner {
+  animation: rss-spin 0.9s linear infinite;
+  border: 2px solid rgba(255, 244, 222, 0.18);
+  border-top-color: #f4e4cd;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  height: 22px;
+  width: 22px;
+}
+
+@keyframes rss-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .rss-conversation-block,
 .rss-reply-panel,
 .rss-completed-panel,

@@ -985,6 +985,15 @@
     );
   }
 
+  function QueueLoadingState({view}) {
+    return h(
+      "div",
+      {className: "rss-queue-loading", role: "status", "aria-live": "polite"},
+      h("div", {className: "rss-spinner", "aria-hidden": "true"}),
+      h("div", null, h("strong", null, "Loading conversations"), h("p", null, `Fetching ${queueViewLabel(view)} conversations...`)),
+    );
+  }
+
   function App() {
     const [config, setConfig] = useState(null);
     const [profiles, setProfiles] = useState([]);
@@ -2136,7 +2145,9 @@
                 ),
               )
             : null,
-          filteredQueue.length
+          loadingQueue
+            ? h(QueueLoadingState, {view: queueView})
+            : filteredQueue.length
             ? h(
                 "div",
                 {className: "rss-list"},
