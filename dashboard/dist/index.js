@@ -102,6 +102,23 @@
     return task.status === "open" || task.status === "claimed";
   }
 
+  function queueStatusForView(view) {
+    if (view === "completed") return "completed";
+    if (view === "all") return "all";
+    return "active";
+  }
+
+  function queueSummaryForView(view, queue, filteredQueue, lastRefresh, queueLimit) {
+    const loaded = view === "all" ? queue.length : filteredQueue.length;
+    const label = view === "completed" ? "completed" : view === "all" ? "conversations" : "pending";
+    return [
+      `${loaded} ${label}`,
+      `${queueViewLabel(view)} view`,
+      queue.length >= queueLimit ? `latest ${queueLimit} loaded` : null,
+      lastRefresh || "not refreshed",
+    ].filter(Boolean).join(" · ");
+  }
+
   function taskIdOf(task) {
     return safeValue(task && task.task_id).trim();
   }
@@ -110,15 +127,6 @@
     const left = safeValue(b && (b.updated_at || b.completed_at || b.created_at));
     const right = safeValue(a && (a.updated_at || a.completed_at || a.created_at));
     return left.localeCompare(right);
-  }
-
-  function syncTaskStateSnapshot(tasks, taskStateRef) {
-    const nextStates = new Map();
-    (Array.isArray(tasks) ? tasks : []).forEach((item) => {
-      if (!item || !item.task_id) return;
-      nextStates.set(item.task_id, {signature: taskActivitySignature(item)});
-    });
-    taskStateRef.current = nextStates;
   }
 
   function environmentOptions(config) {
@@ -1004,6 +1012,7 @@
     const [replyBusy, setReplyBusy] = useState("");
     const [lastRefresh, setLastRefresh] = useState("");
     const [newTaskIds, setNewTaskIds] = useState([]);
+    const [activeCounts, setActiveCounts] = useState({open: 0, claimed: 0});
     const [activityNotice, setActivityNotice] = useState("");
     const [launchState, setLaunchState] = useState({open: false, phase: "idle", mode: "start", taskId: "", sessionId: "", error: ""});
     const [confirmState, setConfirmState] = useState(null);
@@ -1013,8 +1022,10 @@
     const wsRef = useRef(null);
     const linksRequestRef = useRef(0);
     const queueRequestRef = useRef(0);
+    const notificationRequestRef = useRef(0);
     const taskRequestRef = useRef(0);
     const activeProfileRef = useRef("");
+    const queueViewRef = useRef(queueView);
     const selectedIdRef = useRef(selectedId);
     const confirmResolverRef = useRef(null);
 
@@ -1048,9 +1059,8 @@
     const sessionLaunchBusy = Boolean(
       launchState.phase === "running" && task && launchState.taskId === task.task_id,
     );
-    const openCount = queue.filter((item) => item.status === "open").length;
-    const claimedCount = queue.filter((item) => item.status === "claimed").length;
-    const completedCount = queue.filter((item) => item.status === "completed").length;
+    const openCount = activeCounts.open || 0;
+    const claimedCount = activeCounts.claimed || 0;
     const pollMs = 15000;
     const queueLimit = 100;
     const detailLoading = Boolean(selectedId && (loadingTask || (taskRecord && taskIdOf(taskRecord) !== selectedId)));
@@ -1148,7 +1158,6 @@
           .filter((item) => !(updatedTask.conversation_id && item.conversation_id === updatedTask.conversation_id));
         next.unshift(updatedTask);
         next.sort(compareRecentTasks);
-        syncTaskStateSnapshot(next, seenTaskStateRef);
         return next;
       });
     }, []);
@@ -1161,6 +1170,7 @@
         rememberProfileId("");
         setSessionLinks([]);
         setQueue([]);
+        setActiveCounts({open: 0, claimed: 0});
         resetSelection();
         setError("Restart Hermes Dashboard to load the updated Ruby Support backend, then reopen this tab.");
         return;
@@ -1188,6 +1198,7 @@
       if (!nextProfiles.length) {
         setSessionLinks([]);
         setQueue([]);
+        setActiveCounts({open: 0, claimed: 0});
         resetSelection();
       }
     }, [resetSelection]);
@@ -1255,38 +1266,51 @@
     const loadQueue = useCallback(
       async (options = {}) => {
         if (!activeProfileId) return;
-        const requestId = queueRequestRef.current + 1;
-        queueRequestRef.current = requestId;
+        const updateQueue = options.updateQueue !== false;
+        const requestRef = updateQueue ? queueRequestRef : notificationRequestRef;
+        const requestId = requestRef.current + 1;
+        requestRef.current = requestId;
         const profileId = activeProfileId;
-        if (!options.silent) setLoadingQueue(true);
+        const view = options.statusView || queueViewRef.current || "active";
+        const status = queueStatusForView(view);
+        if (updateQueue && !options.silent) setLoadingQueue(true);
         setError("");
         try {
-          const response = await apiFetch(withProfile(`/handoffs?status=all&limit=${queueLimit}`, profileId));
-          if (queueRequestRef.current !== requestId || activeProfileRef.current !== profileId) return;
+          const response = await apiFetch(withProfile(`/handoffs?status=${encodeURIComponent(status)}&limit=${queueLimit}`, profileId));
+          if (requestRef.current !== requestId || activeProfileRef.current !== profileId) return;
           const tasks = response.tasks || [];
-          const previousStates = seenTaskStateRef.current;
-          const nextStates = new Map();
-          const nextNew = [];
-          const nextUpdated = [];
-          tasks.forEach((item) => {
-            if (!item || !item.task_id) return;
-            const snapshot = {signature: taskActivitySignature(item)};
-            const previous = previousStates.get(item.task_id);
-            const shouldNotify = item.status === "open" || item.status === "claimed";
-            if (!previous && shouldNotify) nextNew.push(item);
-            else if (previous && previous.signature !== snapshot.signature && shouldNotify) nextUpdated.push(item);
-            nextStates.set(item.task_id, snapshot);
-          });
-          seenTaskStateRef.current = nextStates;
-          setQueue(tasks.sort(compareRecentTasks));
-          setLastRefresh(new Date().toLocaleTimeString());
-          if (options.detectNew) notifyTaskActivity(nextNew, nextUpdated);
+          let nextNew = [];
+          let nextUpdated = [];
+          if (status === "active") {
+            const previousStates = seenTaskStateRef.current;
+            const nextStates = new Map();
+            let nextOpenCount = 0;
+            let nextClaimedCount = 0;
+            tasks.forEach((item) => {
+              if (!item || !item.task_id) return;
+              const snapshot = {signature: taskActivitySignature(item)};
+              const previous = previousStates.get(item.task_id);
+              const shouldNotify = item.status === "open" || item.status === "claimed";
+              if (item.status === "open") nextOpenCount += 1;
+              if (item.status === "claimed") nextClaimedCount += 1;
+              if (!previous && shouldNotify) nextNew.push(item);
+              else if (previous && previous.signature !== snapshot.signature && shouldNotify) nextUpdated.push(item);
+              nextStates.set(item.task_id, snapshot);
+            });
+            seenTaskStateRef.current = nextStates;
+            setActiveCounts({open: nextOpenCount, claimed: nextClaimedCount});
+          }
+          if (updateQueue) {
+            setQueue(tasks.sort(compareRecentTasks));
+            setLastRefresh(new Date().toLocaleTimeString());
+          }
+          if (options.detectNew && status === "active") notifyTaskActivity(nextNew, nextUpdated);
         } catch (nextError) {
-          if (queueRequestRef.current !== requestId || activeProfileRef.current !== profileId) return;
+          if (requestRef.current !== requestId || activeProfileRef.current !== profileId) return;
           setError(formatDetail(nextError));
         } finally {
-          if (queueRequestRef.current !== requestId || activeProfileRef.current !== profileId) return;
-          setLoadingQueue(false);
+          if (requestRef.current !== requestId || activeProfileRef.current !== profileId) return;
+          if (updateQueue) setLoadingQueue(false);
         }
       },
       [activeProfileId, notifyTaskActivity, queueLimit],
@@ -1334,7 +1358,9 @@
 
     const changeQueueView = useCallback(
       (nextView) => {
+        queueViewRef.current = nextView;
         setQueueView(nextView);
+        loadQueue({silent: false, detectNew: false, statusView: nextView});
         const nextVisible = queue.filter((item) => queueViewMatchesTask(nextView, item));
         const currentSelectedId = selectedIdRef.current;
         const selectedVisible = currentSelectedId && nextVisible.some((item) => item.task_id === currentSelectedId);
@@ -1345,7 +1371,7 @@
         }
         resetSelection();
       },
-      [loadTask, queue, resetSelection],
+      [loadQueue, loadTask, queue, resetSelection],
     );
 
     const runTaskAction = useCallback(
@@ -1479,10 +1505,12 @@
         resetSelection();
         setSessionLinks([]);
         setQueue([]);
+        setActiveCounts({open: 0, claimed: 0});
         setLaunchState({open: false, phase: "idle", mode: "start", taskId: "", sessionId: "", error: ""});
         linksRequestRef.current += 1;
         seenTaskStateRef.current = new Map();
         queueRequestRef.current += 1;
+        notificationRequestRef.current += 1;
         taskRequestRef.current += 1;
         try {
           await apiFetch(`/profiles/${encodeURIComponent(profileId)}/activate`, {method: "POST"});
@@ -1887,6 +1915,10 @@
     }, [selectedId]);
 
     useEffect(() => {
+      queueViewRef.current = queueView;
+    }, [queueView]);
+
+    useEffect(() => {
       loadConfig();
       return () => {
         if (wsRef.current) wsRef.current.close();
@@ -1914,7 +1946,12 @@
     useEffect(() => {
       if (!pollEnabled || !activeProfileId) return undefined;
       const timer = window.setInterval(() => {
-        loadQueue({silent: true, detectNew: true});
+        const currentView = queueViewRef.current;
+        if (currentView === "active") {
+          loadQueue({silent: true, detectNew: true, statusView: "active"});
+          return;
+        }
+        loadQueue({silent: true, detectNew: true, statusView: "active", updateQueue: false});
       }, pollMs);
       return () => window.clearInterval(timer);
     }, [activeProfileId, loadQueue, pollEnabled]);
@@ -1990,15 +2027,7 @@
     const canComplete = task && task.status !== "completed";
     const canReply = task && task.status !== "completed";
     const queueSummary = selectedProfile
-      ? [
-          `${filteredQueue.length} shown`,
-          `${openCount} open`,
-          `${claimedCount} claimed`,
-          `${completedCount} completed`,
-          `${queueViewLabel(queueView)} view`,
-          queue.length >= queueLimit ? `latest ${queueLimit} loaded` : null,
-          lastRefresh || "not refreshed",
-        ].filter(Boolean).join(" · ")
+      ? queueSummaryForView(queueView, queue, filteredQueue, lastRefresh, queueLimit)
       : "No profile selected";
     const launchTask = launchState.taskId
       ? (task && task.task_id === launchState.taskId ? task : queue.find((item) => item.task_id === launchState.taskId) || task)
