@@ -532,6 +532,7 @@
 .rss-conversation-block,
 .rss-reply-panel,
 .rss-completed-panel,
+.rss-customer-card,
 .rss-tool-panel {
   border-top: 1px solid rgba(255, 255, 255, 0.09);
   display: flex;
@@ -612,6 +613,45 @@
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 8px;
   padding: 12px;
+}
+
+.rss-customer-card {
+  background: rgba(0, 0, 0, 0.14);
+  border: 1px solid rgba(255, 244, 222, 0.12);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.rss-customer-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.rss-customer-item,
+.rss-customer-agent {
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: 9px 10px;
+}
+
+.rss-customer-item span,
+.rss-customer-agent span {
+  color: var(--text-secondary, #a8a0bc);
+  font-size: 11px;
+}
+
+.rss-customer-item strong,
+.rss-customer-agent strong {
+  color: var(--text-primary, #f4f1ff);
+  font-size: 12px;
+  font-weight: 550;
+  overflow-wrap: anywhere;
 }
 
 .rss-reply-textarea {
@@ -717,9 +757,17 @@
 }
 
 .rss-row-assignee,
+.rss-row-customer,
 .rss-row-sub {
   color: var(--text-secondary, #a8a0bc);
   font-size: 12px;
+}
+
+.rss-row-customer {
+  color: color-mix(in srgb, var(--text-secondary, #a8a0bc) 72%, #f4e4cd);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .rss-row-main {
@@ -814,7 +862,8 @@
     grid-template-columns: 1fr;
   }
 
-  .rss-detail-grid {
+  .rss-detail-grid,
+  .rss-customer-grid {
     grid-template-columns: 1fr;
   }
 

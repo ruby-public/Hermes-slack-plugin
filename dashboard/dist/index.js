@@ -222,6 +222,39 @@
     return task && task.context && typeof task.context === "object" ? task.context : {};
   }
 
+  function customerContext(task) {
+    const context = taskContext(task);
+    const loggedIn = typeof context.customer_logged_in === "boolean"
+      ? context.customer_logged_in
+      : Boolean(safeValue(context.customer_account).trim());
+    return {
+      loggedIn,
+      loginLabel: loggedIn ? "Logged in" : "Guest",
+      account: safeValue(context.customer_account).trim(),
+      ip: safeValue(context.customer_ip).trim(),
+      device: safeValue(context.customer_device).trim(),
+      userAgent: safeValue(context.customer_user_agent).trim(),
+      domain: safeValue(context.domain).trim(),
+      pageUrl: safeValue(context.page_url).trim(),
+    };
+  }
+
+  function customerSummaryLine(task) {
+    const customer = customerContext(task);
+    return [customer.loginLabel, customer.account, customer.domain].filter(Boolean).join(" · ");
+  }
+
+  function compactUrl(value) {
+    const text = safeValue(value).trim();
+    if (!text) return "";
+    try {
+      const url = new URL(text);
+      return `${url.hostname}${url.pathname === "/" ? "" : url.pathname}`;
+    } catch (_error) {
+      return text;
+    }
+  }
+
   function taskDetails(task) {
     if (!task) return [];
     return [
@@ -595,6 +628,38 @@
     );
   }
 
+  function CustomerContextCard({task}) {
+    const customer = customerContext(task);
+    const items = [
+      ["Status", customer.loginLabel],
+      ["Account", customer.account || "Unknown"],
+      ["IP", customer.ip || "Unknown"],
+      ["Device", customer.device || "Unknown"],
+      ["Domain", customer.domain || "Unknown"],
+      ["Page", customer.pageUrl ? compactUrl(customer.pageUrl) : "Unknown"],
+    ];
+    return h(
+      "section",
+      {className: "rss-customer-card"},
+      h(
+        "div",
+        {className: "rss-subsection-head"},
+        h("div", null, h("h3", null, "Customer context"), h("p", null, "Identity, device, and current page")),
+        customer.pageUrl ? h(Button, {href: customer.pageUrl}, "Open page") : null,
+      ),
+      h(
+        "div",
+        {className: "rss-customer-grid"},
+        items.map(([label, value]) =>
+          h("div", {className: "rss-customer-item", key: label}, h("span", null, label), h("strong", null, value)),
+        ),
+      ),
+      customer.userAgent
+        ? h("div", {className: "rss-customer-agent"}, h("span", null, "User agent"), h("strong", null, customer.userAgent))
+        : null,
+    );
+  }
+
   function DetailsPanel({task, show, onToggle}) {
     return h(
       "section",
@@ -661,6 +726,7 @@
     const hermesLabel = launchBusy ? "Starting Hermes" : hermesSessionLabel(sessionLink, pendingSync);
     const conversationLabel = task.conversation_id ? `Conversation #${task.conversation_id}` : task.task_id;
     const timestamp = task.status === "completed" ? task.completed_at || task.updated_at || task.created_at : task.updated_at || task.created_at;
+    const customerSummary = customerSummaryLine(task);
     return h(
       "button",
       {
@@ -674,6 +740,7 @@
         h("span", {className: "rss-row-assignee"}, assignee),
       ),
       h("span", {className: "rss-row-main"}, task.user_message || task.task_id),
+      customerSummary ? h("span", {className: "rss-row-customer"}, customerSummary) : null,
       h("span", {className: "rss-row-sub"}, `${conversationLabel} · ${formatDateTime(timestamp)}`),
       sessionLink || launchBusy
         ? h(
@@ -2209,6 +2276,7 @@
                   onOpenSession: () => openHermesSession(task, selectedSessionLink),
                   onResume: resumeSelectedTask,
                 }),
+                h(CustomerContextCard, {task}),
                 h(
                   "section",
                   {className: "rss-conversation-block"},

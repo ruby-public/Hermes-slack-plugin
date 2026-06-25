@@ -15,7 +15,7 @@ from fastapi import APIRouter, HTTPException, Query
 router = APIRouter()
 
 PLUGIN_NAME = "ruby-slack-support"
-PLUGIN_VERSION = "0.6.4"
+PLUGIN_VERSION = "0.6.5"
 WORKER_REQUEST_ATTEMPTS = 3
 MAX_PROMPT_JSON_CHARS = 14000
 DEFAULT_SITE = "main"
@@ -487,6 +487,20 @@ def _build_prompt(task: dict[str, Any]) -> str:
     messages = _as_list(conversation.get("messages") if isinstance(conversation, dict) else [])
     risk_flags = ", ".join(str(item) for item in _as_list(task.get("risk_flags"))) or "none"
     sources = _as_list(task.get("sources"))
+    logged_in = context.get("customer_logged_in")
+    if isinstance(logged_in, bool):
+        login_label = "logged in" if logged_in else "guest / not logged in"
+    else:
+        login_label = "unknown"
+    customer_lines = [
+        f"- Login status: {login_label}",
+        f"- Account: {context.get('customer_account') or 'unknown'}",
+        f"- IP: {context.get('customer_ip') or 'unknown'}",
+        f"- Device: {context.get('customer_device') or 'unknown'}",
+        f"- User agent: {context.get('customer_user_agent') or 'unknown'}",
+        f"- Domain: {context.get('domain') or 'unknown'}",
+        f"- Page URL: {context.get('page_url') or 'unknown'}",
+    ]
     source_lines = []
     for index, source in enumerate(sources[:5], start=1):
         if not isinstance(source, dict):
@@ -531,6 +545,9 @@ def _build_prompt(task: dict[str, Any]) -> str:
         f"- Confidence: {task.get('confidence', 'n/a')}",
         f"- Risk flags: {risk_flags}",
         f"- Chatwoot conversation: {context.get('conversation_url') or task.get('conversation_id') or 'n/a'}",
+        "",
+        "Customer context:",
+        "\n".join(customer_lines),
         "",
         "Conversation history:",
         "\n".join(message_lines) if message_lines else "(not available from Worker history)",
